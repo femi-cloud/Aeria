@@ -6,25 +6,47 @@ const FINGERS = [
   { name: 'pinky', tip: 20, knuckle: 17, noteIndex: 4 },
 ]
 
+const CHORD_SHAPES = [
+  { fingers: ['thumb', 'middle', 'pinky'], id: 'c-major', name: 'C major', rightNotes: ['C4', 'E4', 'G4'], leftNotes: ['C3', 'E3', 'G3'] },
+  { fingers: ['index', 'ring'], id: 'a-minor', name: 'A minor', rightNotes: ['A3', 'C4', 'E4'], leftNotes: ['A2', 'C3', 'E3'] },
+]
+
 const LEFT_HAND_NOTES = ['C3', 'D3', 'E3', 'G3', 'A3']
 const RIGHT_HAND_NOTES = ['C4', 'D4', 'E4', 'G4', 'A4']
 const PINCH_MELODY_NOTES = ['C4', 'D4', 'E4', 'G4', 'A4', 'C5', 'D5', 'E5', 'G5', 'A5']
 const CURL_THRESHOLD_RATIO = 0.95
 const PINCH_THRESHOLD = 0.06
+const FIST_THRESHOLD_RATIO = 1.1
 
 export function getCurledFingerNotes(allLandmarks, allHandedness) {
   return allLandmarks.flatMap((landmarks, handIndex) => {
     const handSide = getHandSide(allHandedness[handIndex], handIndex)
     const notes = handSide === 'left' ? LEFT_HAND_NOTES : RIGHT_HAND_NOTES
-    const palmWidth = getLandmarkDistance(landmarks[5], landmarks[17])
+    const curledFingers = getCurledFingers(landmarks)
 
-    return FINGERS
-      .filter((finger) => isFingerCurled(landmarks, finger, palmWidth))
+    return curledFingers
       .map((finger) => ({
         id: `${handSide}-${finger.name}`,
         note: notes[finger.noteIndex],
         position: landmarks[finger.tip],
       }))
+  })
+}
+
+export function getCurledFingerChords(allLandmarks, allHandedness) {
+  return allLandmarks.flatMap((landmarks, handIndex) => {
+    const handSide = getHandSide(allHandedness[handIndex], handIndex)
+    const curledFingers = getCurledFingers(landmarks)
+    const curledFingerNames = curledFingers.map(({ name }) => name)
+    const chord = CHORD_SHAPES.find(({ fingers }) => hasExactFingerShape(curledFingerNames, fingers))
+    if (!chord) return []
+
+    return [{
+      id: `${handSide}-${chord.id}`,
+      name: chord.name,
+      notes: handSide === 'left' ? chord.leftNotes : chord.rightNotes,
+      position: landmarks[curledFingers[0].tip],
+    }]
   })
 }
 
@@ -51,6 +73,20 @@ export function isPinching(landmarks) {
   return Boolean(thumbTip && indexTip && getLandmarkDistance(thumbTip, indexTip) < PINCH_THRESHOLD)
 }
 
+export function areBothHandsClosedFists(allLandmarks) {
+  return allLandmarks.length >= 2 && allLandmarks.every(isClosedFist)
+}
+
+function isClosedFist(landmarks) {
+  const palmCenter = getPalmCenter(landmarks)
+  const palmWidth = getLandmarkDistance(landmarks[5], landmarks[17])
+  if (!palmCenter || !palmWidth) return false
+
+  return [4, 8, 12, 16, 20].every((tipIndex) => (
+    getLandmarkDistance(landmarks[tipIndex], palmCenter) < palmWidth * FIST_THRESHOLD_RATIO
+  ))
+}
+
 function isFingerCurled(landmarks, finger, palmWidth) {
   const fingertip = landmarks[finger.tip]
   const lowerKnuckle = landmarks[finger.knuckle]
@@ -58,6 +94,16 @@ function isFingerCurled(landmarks, finger, palmWidth) {
 
   // Scaling the threshold by palm width keeps the gesture consistent at different distances from the camera.
   return getLandmarkDistance(fingertip, lowerKnuckle) < palmWidth * CURL_THRESHOLD_RATIO
+}
+
+function getCurledFingers(landmarks) {
+  const palmWidth = getLandmarkDistance(landmarks[5], landmarks[17])
+  return FINGERS.filter((finger) => isFingerCurled(landmarks, finger, palmWidth))
+}
+
+function hasExactFingerShape(curledFingerNames, expectedFingerNames) {
+  return curledFingerNames.length === expectedFingerNames.length
+    && expectedFingerNames.every((fingerName) => curledFingerNames.includes(fingerName))
 }
 
 function getHandSide(handedness, handIndex = 0) {
@@ -70,6 +116,20 @@ function getHandSide(handedness, handIndex = 0) {
 function getLandmarkDistance(first, second) {
   if (!first || !second) return 0
   return Math.hypot(first.x - second.x, first.y - second.y, first.z - second.z)
+}
+
+function getPalmCenter(landmarks) {
+  const palmLandmarks = [0, 5, 9, 13, 17].map((index) => landmarks[index]).filter(Boolean)
+  if (!palmLandmarks.length) return null
+
+  return palmLandmarks.reduce(
+    (center, landmark) => ({
+      x: center.x + landmark.x / palmLandmarks.length,
+      y: center.y + landmark.y / palmLandmarks.length,
+      z: center.z + landmark.z / palmLandmarks.length,
+    }),
+    { x: 0, y: 0, z: 0 },
+  )
 }
 
 function clamp(value, min, max) {

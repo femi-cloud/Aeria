@@ -4,7 +4,7 @@ import { createHandLandmarker, HandLandmarker } from '../lib/handTracking.js'
 const HAND_COLORS = ['#a791ff', '#5be6b3']
 const LOG_INTERVAL_MS = 500
 
-function HandTracker({ videoRef, onError, onResults }) {
+function HandTracker({ videoRef, onError, onResults, reloadKey }) {
   const canvasRef = useRef(null)
   const lastLogTimeRef = useRef(0)
   const hasHandsRef = useRef(false)
@@ -17,6 +17,8 @@ function HandTracker({ videoRef, onError, onResults }) {
     let isDisposed = false
 
     async function startTracking() {
+      setIsLoading(true)
+      setHasHands(false)
       try {
         handLandmarker = await createHandLandmarker()
         if (isDisposed) {
@@ -81,7 +83,7 @@ function HandTracker({ videoRef, onError, onResults }) {
       cancelAnimationFrame(animationFrameId)
       handLandmarker?.close()
     }
-  }, [onError, onResults, videoRef])
+  }, [onError, onResults, reloadKey, videoRef])
 
   return (
     <>
