@@ -1,11 +1,11 @@
 import * as Tone from 'tone'
 
 const INSTRUMENTS = ['Piano', 'Pad', 'Bells', 'Violin']
-const PENTATONIC_ARPEGGIO = ['C4', 'D4', 'E4', 'G4', 'A4', 'C5', 'D5', 'E5', 'G5', 'A5']
+const C_MAJOR_ARPEGGIO = ['C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4', 'C5', 'D5', 'E5', 'F5', 'G5', 'A5', 'B5', 'C6']
 
 let activeInstrument
 let activeInstrumentIndex = 0
-let recorder
+let recordingAudioDestination
 let sustainTimeout
 let thereminSynth
 let thereminFilter
@@ -30,24 +30,25 @@ export function cycleInstrument() {
   return INSTRUMENTS[activeInstrumentIndex]
 }
 
-export async function startAudioRecording() {
-  await Tone.start()
+export function createRecordingAudioStream() {
+  if (recordingAudioDestination) return recordingAudioDestination.stream
 
-  if (!Tone.Recorder.supported) {
-    throw new Error('This browser does not support audio recording.')
+  const rawContext = Tone.getContext().rawContext
+  if (!rawContext?.createMediaStreamDestination) {
+    throw new Error('This browser cannot create an audio stream for video recording.')
   }
 
-  if (!recorder) {
-    recorder = new Tone.Recorder()
-    Tone.Destination.connect(recorder)
-  }
-
-  await recorder.start()
+  recordingAudioDestination = rawContext.createMediaStreamDestination()
+  Tone.Destination.connect(recordingAudioDestination)
+  return recordingAudioDestination.stream
 }
 
-export async function stopAudioRecording() {
-  if (!recorder || recorder.state !== 'started') return null
-  return recorder.stop()
+export function disposeRecordingAudioStream() {
+  if (!recordingAudioDestination) return
+
+  Tone.Destination.disconnect(recordingAudioDestination)
+  recordingAudioDestination.disconnect()
+  recordingAudioDestination = undefined
 }
 
 export function updateFingerNotes(nextFingerNotes) {
@@ -126,12 +127,12 @@ export function activateSustain(durationMs = 3200) {
   }, durationMs)
 }
 
-export function playPentatonicArpeggio() {
+export function playMajorArpeggio() {
   const synth = activeInstrument?.synth
   if (!synth) return
 
   const startTime = Tone.now()
-  PENTATONIC_ARPEGGIO.forEach((note, index) => {
+  C_MAJOR_ARPEGGIO.forEach((note, index) => {
     synth.triggerAttackRelease(note, 0.16, startTime + index * 0.1)
   })
 }
@@ -195,11 +196,7 @@ export function disposeMusicEngine() {
   thereminFilter = undefined
   thereminPanner = undefined
   thereminVibrato = undefined
-  if (recorder) {
-    Tone.Destination.disconnect(recorder)
-    recorder.dispose()
-  }
-  recorder = undefined
+  disposeRecordingAudioStream()
 }
 
 function ensureActiveInstrument() {

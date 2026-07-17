@@ -1,19 +1,28 @@
-import { useEffect, useRef, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { createHandLandmarker, HandLandmarker } from '../lib/handTracking.js'
 
 const HAND_COLORS = ['#a791ff', '#5be6b3']
-const HAND_IDENTITY_COLORS = ['#a791ff', '#5be6b3', '#ff9d68', '#68c8ff']
 const LOG_INTERVAL_MS = 1000
+const DUPLICATE_WRIST_DISTANCE_RATIO = 0.7
+const MIN_HANDEDNESS_CONFIDENCE = 0.75
+const MIN_PALM_SIZE = 0.025
+const MAX_PALM_SIZE = 0.65
+const MAX_FINGER_REACH_RATIO = 4
+const MAX_WRIST_JUMP_PALM_MULTIPLIER = 4.5
+const WRIST_JUMP_GRACE_MS = 220
 
-function HandTracker({ videoRef, onError, onResults, reloadKey }) {
+const HandTracker = forwardRef(function HandTracker({ videoRef, onError, onResults, reloadKey }, ref) {
   const canvasRef = useRef(null)
   const lastLogTimeRef = useRef(0)
   const hasHandsRef = useRef(false)
   const lastVideoTimeRef = useRef(-1)
-  const previousHandsRef = useRef([])
-  const nextHandIdRef = useRef(1)
+  const previousValidHandsRef = useRef(new Map())
   const [isLoading, setIsLoading] = useState(true)
   const [hasHands, setHasHands] = useState(false)
+
+  useImperativeHandle(ref, () => ({
+    getCanvas: () => canvasRef.current,
+  }), [])
 
   useEffect(() => {
     let animationFrameId
@@ -52,13 +61,25 @@ function HandTracker({ videoRef, onError, onResults, reloadKey }) {
         try {
           lastVideoTimeRef.current = video.currentTime
           const results = handLandmarker.detectForVideo(video, performance.now())
-          const landmarks = results.landmarks ?? []
-          const identities = assignHandIdentities(landmarks, results.handedness ?? [], previousHandsRef, nextHandIdRef)
+          const { landmarks, handedness } = filterOverlappingHands(
+            results.landmarks ?? [],
+            results.handedness ?? [],
+          )
+          const isValidFrame = areHandsStableAndPlausible(
+            landmarks,
+            handedness,
+            previousValidHandsRef.current,
+            performance.now(),
+          )
 
-          drawHandSkeleton(canvas, video, landmarks, identities)
-          updateHandHint(landmarks.length > 0)
-          logLandmarks(landmarks)
-          onResults({ landmarks, handedness: results.handedness ?? [], identities })
+          if (!isValidFrame) {
+            drawHandSkeleton(canvas, video, [], [])
+          } else {
+            drawHandSkeleton(canvas, video, landmarks, handedness)
+            updateHandHint(landmarks.length > 0)
+            logLandmarks(landmarks)
+            onResults({ landmarks, handedness })
+          }
         } catch (error) {
           onError('Hand tracking stopped unexpectedly. Refresh the page to try again.')
           console.error('Aeria: MediaPipe hand detection failed.', error)
@@ -110,9 +131,9 @@ function HandTracker({ videoRef, onError, onResults, reloadKey }) {
       {!isLoading && !hasHands && <p className="ae-hand-tracker__hint">Show your hands to the camera</p>}
     </>
   )
-}
+})
 
-function drawHandSkeleton(canvas, video, hands, identities) {
+function drawHandSkeleton(canvas, video, hands, handedness) {
   const width = video.videoWidth
   const height = video.videoHeight
   if (!width || !height) return
@@ -126,7 +147,7 @@ function drawHandSkeleton(canvas, video, hands, identities) {
   context.clearRect(0, 0, width, height)
 
   hands.forEach((hand, handIndex) => {
-    const color = identities[handIndex]?.color ?? HAND_COLORS[handIndex % HAND_COLORS.length]
+    const color = getHandColor(handedness[handIndex], handIndex)
     context.strokeStyle = color
     context.fillStyle = color
     context.lineWidth = Math.max(3, width * 0.003)
@@ -148,48 +169,95 @@ function drawHandSkeleton(canvas, video, hands, identities) {
   })
 }
 
-function assignHandIdentities(landmarks, handedness, previousHandsRef, nextHandIdRef) {
-  const previousHands = previousHandsRef.current
-  const matches = []
+function getHandColor(handedness, handIndex) {
+  const label = handedness?.[0]?.categoryName?.toLowerCase()
+  if (label === 'left') return HAND_COLORS[1]
+  if (label === 'right') return HAND_COLORS[0]
+  return HAND_COLORS[handIndex % HAND_COLORS.length]
+}
 
-  landmarks.forEach((hand, handIndex) => {
-    previousHands.forEach((previousHand, previousIndex) => {
-      const wrist = hand[0]
-      const distance = Math.hypot(wrist.x - previousHand.wrist.x, wrist.y - previousHand.wrist.y)
-      const currentLabel = handedness[handIndex]?.[0]?.categoryName
-      const handednessPenalty = currentLabel && previousHand.label && currentLabel !== previousHand.label ? 0.12 : 0
-      matches.push({ distance: distance + handednessPenalty, handIndex, previousIndex })
-    })
+function filterOverlappingHands(landmarks, handedness) {
+  if (landmarks.length !== 2) return { landmarks, handedness }
+
+  const [firstHand, secondHand] = landmarks
+  const wristDistance = getLandmarkDistance(firstHand[0], secondHand[0])
+  const averagePalmSize = (getPalmSize(firstHand) + getPalmSize(secondHand)) / 2
+
+  // Two independent hands cannot have nearly coincident wrists relative to their palm size.
+  if (!averagePalmSize || wristDistance >= averagePalmSize * DUPLICATE_WRIST_DISTANCE_RATIO) {
+    return { landmarks, handedness }
+  }
+
+  const firstScore = handedness[0]?.[0]?.score ?? 0
+  const secondScore = handedness[1]?.[0]?.score ?? 0
+  const keepIndex = secondScore > firstScore ? 1 : 0
+
+  return {
+    landmarks: [landmarks[keepIndex]],
+    handedness: handedness[keepIndex] ? [handedness[keepIndex]] : [],
+  }
+}
+
+function getPalmSize(hand) {
+  const wrist = hand[0]
+  const knuckles = [5, 9, 13, 17].map((index) => hand[index]).filter(Boolean)
+  if (!wrist || !knuckles.length) return 0
+
+  return knuckles.reduce((total, knuckle) => total + getLandmarkDistance(wrist, knuckle), 0) / knuckles.length
+}
+
+function getLandmarkDistance(first, second) {
+  if (!first || !second) return 0
+  return Math.hypot(first.x - second.x, first.y - second.y, first.z - second.z)
+}
+
+function areHandsStableAndPlausible(landmarks, handedness, previousHands, now) {
+  if (!landmarks.length) {
+    previousHands.clear()
+    return true
+  }
+
+  const nextHands = new Map()
+  const areAllHandsValid = landmarks.every((hand, handIndex) => {
+    const palmSize = getPalmSize(hand)
+    if (!isPlausibleHand(hand, handedness[handIndex], palmSize)) return false
+
+    const key = getHandTrackingKey(handedness[handIndex], handIndex)
+    const previous = previousHands.get(key)
+    const wristJump = previous ? getLandmarkDistance(hand[0], previous.wrist) : 0
+    const jumpThreshold = Math.max(0.14, ((palmSize + (previous?.palmSize ?? palmSize)) / 2) * MAX_WRIST_JUMP_PALM_MULTIPLIER)
+    if (previous && now - previous.seenAt < WRIST_JUMP_GRACE_MS && wristJump > jumpThreshold) return false
+
+    nextHands.set(key, { palmSize, seenAt: now, wrist: hand[0] })
+    return true
   })
 
-  matches.sort((first, second) => first.distance - second.distance)
-  const identities = Array(landmarks.length)
-  const usedHands = new Set()
-  const usedPreviousHands = new Set()
+  if (!areAllHandsValid) return false
+  previousHands.clear()
+  nextHands.forEach((hand, key) => previousHands.set(key, hand))
+  return true
+}
 
-  matches.forEach(({ distance, handIndex, previousIndex }) => {
-    if (distance > 0.35 || usedHands.has(handIndex) || usedPreviousHands.has(previousIndex)) return
-    identities[handIndex] = previousHands[previousIndex].identity
-    usedHands.add(handIndex)
-    usedPreviousHands.add(previousIndex)
-  })
+function isPlausibleHand(hand, handedness, palmSize) {
+  if (hand.length !== 21 || palmSize < MIN_PALM_SIZE || palmSize > MAX_PALM_SIZE) return false
 
-  landmarks.forEach((hand, handIndex) => {
-    if (identities[handIndex]) return
-    const idNumber = nextHandIdRef.current++
-    identities[handIndex] = {
-      color: HAND_IDENTITY_COLORS[(idNumber - 1) % HAND_IDENTITY_COLORS.length],
-      id: `hand-${idNumber}`,
-    }
-  })
+  const confidence = handedness?.[0]?.score
+  if (Number.isFinite(confidence) && confidence < MIN_HANDEDNESS_CONFIDENCE) return false
 
-  previousHandsRef.current = landmarks.map((hand, handIndex) => ({
-    identity: identities[handIndex],
-    label: handedness[handIndex]?.[0]?.categoryName,
-    wrist: hand[0],
-  }))
+  const coordinatesAreFinite = hand.every(({ x, y, z }) => (
+    Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)
+      && x >= -0.2 && x <= 1.2 && y >= -0.2 && y <= 1.2 && z >= -1.2 && z <= 1.2
+  ))
+  if (!coordinatesAreFinite) return false
 
-  return identities
+  return [[4, 2], [8, 5], [12, 9], [16, 13], [20, 17]].every(([tip, knuckle]) => (
+    getLandmarkDistance(hand[tip], hand[knuckle]) <= palmSize * MAX_FINGER_REACH_RATIO
+  ))
+}
+
+function getHandTrackingKey(handedness, handIndex) {
+  const label = handedness?.[0]?.categoryName?.toLowerCase()
+  return label === 'left' || label === 'right' ? label : `hand-${handIndex}`
 }
 
 export default HandTracker

@@ -13,10 +13,10 @@ export async function createHandLandmarker() {
       modelAssetPath: HAND_LANDMARKER_MODEL,
     },
     runningMode: 'VIDEO',
-    numHands: 4,
-    minHandDetectionConfidence: 0.6,
-    minHandPresenceConfidence: 0.6,
-    minTrackingConfidence: 0.5,
+    numHands: 2,
+    minHandDetectionConfidence: 0.75,
+    minHandPresenceConfidence: 0.75,
+    minTrackingConfidence: 0.7,
   })
 }
 

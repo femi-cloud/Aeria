@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import HandTracker from '../components/HandTracker.jsx'
 import InstrumentBadge from '../components/InstrumentBadge.jsx'
+import InstrumentVisuals from '../components/InstrumentVisuals.jsx'
 import CalibrationOverlay from '../components/CalibrationOverlay.jsx'
 import OnboardingOverlay from '../components/OnboardingOverlay.jsx'
 import ParticleCanvas from '../components/ParticleCanvas.jsx'
 import RecordingControls from '../components/RecordingControls.jsx'
+import RecordingCanvas from '../components/RecordingCanvas.jsx'
 import WaveformBar from '../components/WaveformBar.jsx'
 import { areBothHandsClosedFists, collectOpenHandFingerDistances, getCurledFingerChords, getCurledFingerNotes, getLeftHand, getMicroVibratoAmount, getOctaveShiftForWrist, getOpenPalms, getPeaceSigns, getRightHand, getStableCurledFingersByHand, isPinching, mapLeftHandDistanceToVolume, mapRightHandToNote, mapThereminFilterCutoff, mapThereminFrequency, mapThereminPan } from '../lib/gestureMapping.js'
-import { activateSustain, cycleInstrument, disposeMusicEngine, playPentatonicArpeggio, startAudioRecording, startMusicEngine, stopAudioRecording, stopPlayedNotes, updateChordNotes, updateFingerNotes, updatePinchNote, updateTheremin } from '../lib/musicEngine.js'
+import { activateSustain, createRecordingAudioStream, cycleInstrument, disposeMusicEngine, disposeRecordingAudioStream, playMajorArpeggio, startMusicEngine, stopPlayedNotes, updateChordNotes, updateFingerNotes, updatePinchNote, updateTheremin } from '../lib/musicEngine.js'
 import { createRhythmDetector } from '../lib/rhythmDetection.js'
 
 const cameraConstraints = {
@@ -23,13 +25,19 @@ const FIST_HOLD_DURATION_MS = 400
 const MAX_RECORDING_DURATION_MS = 60000
 const OPEN_PALM_HOLD_DURATION_MS = 500
 const PEACE_SIGN_HOLD_DURATION_MS = 350
+const C_MAJOR_SCALE = ['C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4', 'C5']
 
 function PerformanceView() {
   const videoRef = useRef(null)
+  const handTrackerRef = useRef(null)
   const streamRef = useRef(null)
   const controlModeRef = useRef('piano')
   const playModeRef = useRef('notes')
   const particleCanvasRef = useRef(null)
+  const recordingCanvasRef = useRef(null)
+  const mediaRecorderRef = useRef(null)
+  const recordingStreamRef = useRef(null)
+  const recordingChunksRef = useRef([])
   const activeFingerIdsRef = useRef(new Set())
   const pinchWasActiveRef = useRef(false)
   const fistStartedAtRef = useRef(null)
@@ -75,6 +83,8 @@ function PerformanceView() {
   const [thereminPitch, setThereminPitch] = useState(null)
   const [isCalibrating, setIsCalibrating] = useState(false)
   const [calibrationProgress, setCalibrationProgress] = useState(0)
+  const [instrumentVisualEvents, setInstrumentVisualEvents] = useState([])
+  const [thereminVisual, setThereminVisual] = useState(null)
 
   const handleTrackingError = useCallback((message) => {
     setTrackingError(message)
@@ -100,11 +110,13 @@ function PerformanceView() {
     sustainTimeoutRef.current = window.setTimeout(() => setIsSustainActive(false), 3200)
   }, [])
 
-  const handleHandResults = useCallback(({ landmarks, handedness, identities }) => {
-    const handOctaveShifts = updateHandOctaves(landmarks, identities, handOctaveShiftsRef)
-    const nextOctaveIndicators = identities.map((identity, handIndex) => ({
-      color: identity.color,
-      id: identity.id,
+  const handleHandResults = useCallback(({ landmarks, handedness }) => {
+    const handRoles = getHandRoles(landmarks, handedness)
+    const handOctaveShifts = updateHandOctaves(landmarks, handRoles, handOctaveShiftsRef)
+    const nextOctaveIndicators = handRoles.map((handRole, handIndex) => ({
+      color: handRole.color,
+      id: handRole.id,
+      side: handedness[handIndex]?.[0]?.categoryName,
       shift: handOctaveShifts[handIndex],
     }))
     setHandOctaveIndicators((currentIndicators) => (
@@ -114,7 +126,7 @@ function PerformanceView() {
     ))
 
     if (isCalibratingRef.current) {
-      collectCalibrationSamples(landmarks, identities, calibrationBaselinesRef, calibrationSamplesRef, calibrationStartedAtRef, calibrationHasRunRef, isCalibratingRef, lastCalibrationProgressRef, setCalibrationProgress, setIsCalibrating)
+      collectCalibrationSamples(landmarks, handRoles, calibrationBaselinesRef, calibrationSamplesRef, calibrationStartedAtRef, calibrationHasRunRef, isCalibratingRef, lastCalibrationProgressRef, setCalibrationProgress, setIsCalibrating)
       return
     }
 
@@ -155,21 +167,30 @@ function PerformanceView() {
         setThereminPitch((currentPitch) => (
           Math.abs((currentPitch ?? 0) - frequency) < 1 ? currentPitch : frequency
         ))
+        const pitch = 1 - rightHand[0].y
+        const handDistance = leftHand ? Math.hypot(rightHand[0].x - leftHand[0].x, rightHand[0].y - leftHand[0].y) : 0.65
+        const intensity = 0.2 + Math.min(1, (1 - handDistance / 0.9 + pitch) / 2) * 0.8
+        setThereminVisual((currentVisual) => (
+          !currentVisual || Math.abs(currentVisual.intensity - intensity) > 0.025 || Math.abs(currentVisual.pitch - pitch) > 0.025
+            ? { intensity, pitch }
+            : currentVisual
+        ))
       } else {
         stopPlayedNotes()
         thereminYSamplesRef.current = []
         setThereminPitch(null)
+        setThereminVisual(null)
       }
       setActiveNotes((currentNotes) => (currentNotes.length ? [] : currentNotes))
       setActiveNoteDetails((currentNotes) => (currentNotes.length ? [] : currentNotes))
       return
     }
 
-    processHeldGesture(getOpenPalms(landmarks, identities), openPalmStartedAtRef, openPalmTriggeredRef, OPEN_PALM_HOLD_DURATION_MS, triggerSustain)
-    const peaceSigns = getPeaceSigns(landmarks, identities)
+    processHeldGesture(getOpenPalms(landmarks, handRoles), openPalmStartedAtRef, openPalmTriggeredRef, OPEN_PALM_HOLD_DURATION_MS, triggerSustain)
+    const peaceSigns = getPeaceSigns(landmarks, handRoles)
     processHeldGesture(peaceSigns, peaceSignStartedAtRef, peaceSignTriggeredRef, PEACE_SIGN_HOLD_DURATION_MS, (peaceSign) => {
-      playPentatonicArpeggio()
-      ;['C4', 'D4', 'E4', 'G4', 'A4'].forEach((note) => (
+      playMajorArpeggio()
+      C_MAJOR_SCALE.forEach((note) => (
         particleCanvasRef.current?.spawnBurst({ note, position: peaceSign.position })
       ))
       registerNoteOnset()
@@ -191,6 +212,7 @@ function PerformanceView() {
       const note = rightHand ? mapRightHandToNote(rightHand, handOctaveShifts[handIndex]) : undefined
       if (pinching && !pinchWasActiveRef.current) {
         particleCanvasRef.current?.spawnBurst({ note, position: rightHand[8] })
+        setInstrumentVisualEvents((events) => [...events, { id: `note-${performance.now()}-${note}`, note, position: rightHand[8] }].slice(-12))
         registerNoteOnset()
       }
       pinchWasActiveRef.current = pinching
@@ -201,7 +223,7 @@ function PerformanceView() {
       setActiveNotes((currentNotes) => (
         currentNotes.join('|') === nextActiveNotes.join('|') ? currentNotes : nextActiveNotes
       ))
-      const handColor = identities[handIndex]?.color
+      const handColor = handRoles[handIndex]?.color
       setActiveNoteDetails((currentNotes) => (
         currentNotes.length === nextActiveNotes.length && currentNotes[0]?.note === nextActiveNotes[0] && currentNotes[0]?.color === handColor
           ? currentNotes
@@ -212,25 +234,31 @@ function PerformanceView() {
 
     const stableFingersByHand = getStableCurledFingersByHand(
       landmarks,
-      identities,
+      handRoles,
       calibrationBaselinesRef.current,
       fingerCurlStatesRef.current,
     )
     const triggeredItems = playModeRef.current === 'chords'
-      ? getCurledFingerChords(landmarks, handedness, identities, handOctaveShifts, stableFingersByHand)
-      : getCurledFingerNotes(landmarks, handedness, identities, handOctaveShifts, stableFingersByHand)
+      ? getCurledFingerChords(landmarks, handedness, handRoles, handOctaveShifts, stableFingersByHand)
+      : getCurledFingerNotes(landmarks, handedness, handRoles, handOctaveShifts, stableFingersByHand)
     const nextFingerIds = new Set(triggeredItems.map(({ id }) => id))
     let didTriggerNote = false
+    const newVisualEvents = []
     triggeredItems.forEach((item) => {
       if (!activeFingerIdsRef.current.has(item.id)) {
         didTriggerNote = true
         if (item.notes) {
-          item.notes.forEach((note) => particleCanvasRef.current?.spawnBurst({ handColor: item.handColor, note, position: item.position }))
+          item.notes.forEach((note) => {
+            particleCanvasRef.current?.spawnBurst({ handColor: item.handColor, note, position: item.position })
+            newVisualEvents.push({ color: item.handColor, id: `${item.id}-${note}-${performance.now()}`, note, position: item.position })
+          })
         } else {
           particleCanvasRef.current?.spawnBurst(item)
+          newVisualEvents.push({ color: item.handColor, id: `${item.id}-${performance.now()}`, note: item.note, position: item.position })
         }
       }
     })
+    if (newVisualEvents.length) setInstrumentVisualEvents((events) => [...events, ...newVisualEvents].slice(-12))
     if (didTriggerNote) registerNoteOnset()
     activeFingerIdsRef.current = nextFingerIds
     const nextActiveNotes = playModeRef.current === 'chords'
@@ -280,6 +308,12 @@ function PerformanceView() {
 
   useEffect(() => {
     return () => {
+      const recorder = mediaRecorderRef.current
+      if (recorder?.state !== 'inactive') {
+        recorder.onstop = null
+        recorder.stop()
+      }
+      releaseRecordingResources()
       streamRef.current?.getTracks().forEach((track) => track.stop())
       disposeMusicEngine()
       window.clearTimeout(rhythmTimeoutRef.current)
@@ -352,34 +386,95 @@ function PerformanceView() {
 
   async function toggleRecording() {
     if (isRecording) {
-      await finishRecording()
+      finishRecording()
       return
     }
 
     try {
-      await startAudioRecording()
+      if (!window.MediaRecorder || !window.MediaStream) {
+        throw new Error('MediaRecorder is unavailable in this browser.')
+      }
+
+      await startMusicEngine()
+      const visualStream = recordingCanvasRef.current?.captureStream(30)
+      if (!visualStream?.getVideoTracks().length) {
+        throw new Error('The visual recording stream is not ready. Wait for the camera preview, then try again.')
+      }
+
+      const audioStream = createRecordingAudioStream()
+      if (!audioStream.getAudioTracks().length) {
+        throw new Error('The audio recording stream could not be created.')
+      }
+
+      const combinedStream = new MediaStream([
+        ...visualStream.getVideoTracks(),
+        ...audioStream.getAudioTracks(),
+      ])
+      const mimeType = getSupportedRecordingMimeType()
+      const recorder = new MediaRecorder(
+        combinedStream,
+        mimeType ? { mimeType, videoBitsPerSecond: 2_500_000 } : { videoBitsPerSecond: 2_500_000 },
+      )
+
+      recordingChunksRef.current = []
+      recordingStreamRef.current = combinedStream
+      mediaRecorderRef.current = recorder
+      recorder.ondataavailable = ({ data }) => {
+        if (data.size) recordingChunksRef.current.push(data)
+      }
+      recorder.onerror = (event) => {
+        console.error('Aeria: MediaRecorder failed while recording the performance.', event.error)
+        setAudioError('Recording encountered an error and was stopped. Check the browser console, then try again.')
+      }
+      combinedStream.getTracks().forEach((track) => {
+        track.onended = () => {
+          if (recorder.state === 'recording') {
+            console.error('Aeria: a recording stream track ended unexpectedly.', track.kind)
+            setAudioError('Recording lost a media track and was stopped. Check the browser console, then try again.')
+            recorder.stop()
+          }
+        }
+      })
+      recorder.onstop = () => {
+        const recording = recordingChunksRef.current.length
+          ? new Blob(recordingChunksRef.current, { type: recorder.mimeType || 'video/webm' })
+          : null
+        if (recording) setRecordingBlob(recording)
+        else setAudioError('Recording stopped before any video data was captured. Please try again.')
+
+        releaseRecordingResources()
+        mediaRecorderRef.current = null
+        setIsRecording(false)
+      }
+
       setRecordingBlob(null)
       setRecordingSaved(false)
+      setAudioError('')
+      recorder.start(1000)
       setIsRecording(true)
-      recordingTimeoutRef.current = window.setTimeout(() => finishRecording(), MAX_RECORDING_DURATION_MS)
+      recordingTimeoutRef.current = window.setTimeout(() => {
+        setAudioError('Recording reached the 60-second limit and was stopped.')
+        finishRecording()
+      }, MAX_RECORDING_DURATION_MS)
     } catch (error) {
-      setAudioError('Recording is not supported in this browser. Try Chrome or Firefox.')
-      console.error('Aeria: failed to start audio recording.', error)
+      releaseRecordingResources()
+      mediaRecorderRef.current = null
+      setAudioError(error.message || 'Recording is not supported in this browser. Try Chrome or Firefox.')
+      console.error('Aeria: failed to start combined audio/video recording.', error)
     }
   }
 
-  async function finishRecording() {
+  function finishRecording() {
     window.clearTimeout(recordingTimeoutRef.current)
+    const recorder = mediaRecorderRef.current
+    if (!recorder || recorder.state === 'inactive') return
+    recorder.stop()
+  }
 
-    try {
-      const recording = await stopAudioRecording()
-      if (recording) setRecordingBlob(recording)
-    } catch (error) {
-      setAudioError('We could not finish the recording. Please try again.')
-      console.error('Aeria: failed to stop audio recording.', error)
-    } finally {
-      setIsRecording(false)
-    }
+  function releaseRecordingResources() {
+    recordingStreamRef.current?.getTracks().forEach((track) => track.stop())
+    recordingStreamRef.current = null
+    disposeRecordingAudioStream()
   }
 
   function downloadRecording() {
@@ -420,12 +515,34 @@ function PerformanceView() {
         {cameraState === 'active' && !showOnboarding && (
           <>
             <HandTracker
+              ref={handTrackerRef}
               videoRef={videoRef}
               onError={handleTrackingError}
               onResults={handleHandResults}
               reloadKey={trackingRetryKey}
             />
             <ParticleCanvas ref={particleCanvasRef} videoRef={videoRef} />
+            <InstrumentVisuals
+              activeInstrument={activeInstrument}
+              activeNotes={activeNotes}
+              handOctaves={handOctaveIndicators}
+              mode={controlMode}
+              thereminState={thereminVisual}
+              triggerEvents={instrumentVisualEvents}
+            />
+            <RecordingCanvas
+              ref={recordingCanvasRef}
+              activeInstrument={activeInstrument}
+              activeNotes={activeNotes}
+              handCanvasRef={handTrackerRef}
+              handOctaves={handOctaveIndicators}
+              isVideoHidden={isVideoHidden}
+              mode={controlMode}
+              particleCanvasRef={particleCanvasRef}
+              thereminState={thereminVisual}
+              triggerEvents={instrumentVisualEvents}
+              videoRef={videoRef}
+            />
             <InstrumentBadge instrumentName={activeInstrument} pulseId={instrumentPulseId} />
             {isSustainActive && <p className="ae-sustain-indicator">Sustain active</p>}
             <div className="ae-octave-indicators" aria-label="Hand octave shifts">
@@ -532,6 +649,7 @@ function PerformanceView() {
           </div>
         )}
         <RecordingControls
+          disabled={cameraState !== 'active' || showOnboarding}
           hasRecording={Boolean(recordingBlob)}
           isRecording={isRecording}
           onDownload={downloadRecording}
@@ -549,7 +667,7 @@ function PerformanceView() {
               : 'Curl a finger toward your palm to play; use both hands for chords.'
             : controlMode === 'theremin'
               ? 'Theremin+: right hand controls pitch, pan, tone, and vibrato; left hand controls volume.'
-              : 'Move your right hand up or down to choose a pentatonic note, then pinch to play it.'}
+              : 'Move your right hand up or down to choose a C-major scale note, then pinch to play it.'}
         </p>
       )}
       {audioError && <p className="ae-audio-error">{audioError}</p>}
@@ -573,6 +691,16 @@ function getCameraErrorMessage(error) {
   return 'We could not start the camera. Check your camera connection and browser permissions, then try again.'
 }
 
+function getSupportedRecordingMimeType() {
+  const candidates = [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm',
+  ]
+
+  return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType))
+}
+
 function processHeldGesture(gestures, startedAtRef, triggeredRef, holdDuration, onTrigger) {
   const activeGestureIds = new Set(gestures.map(({ id }) => id))
   const now = performance.now()
@@ -593,14 +721,14 @@ function processHeldGesture(gestures, startedAtRef, triggeredRef, holdDuration, 
   })
 }
 
-function collectCalibrationSamples(landmarks, identities, baselinesRef, samplesRef, startedAtRef, hasRunRef, isCalibratingRef, lastProgressRef, setProgress, setIsCalibrating) {
+function collectCalibrationSamples(landmarks, handRoles, baselinesRef, samplesRef, startedAtRef, hasRunRef, isCalibratingRef, lastProgressRef, setProgress, setIsCalibrating) {
   if (!landmarks.length) return
 
   const now = performance.now()
   if (startedAtRef.current === null) startedAtRef.current = now
 
   landmarks.forEach((handLandmarks, handIndex) => {
-    const handId = identities[handIndex]?.id ?? `hand-${handIndex}`
+    const handId = handRoles[handIndex]?.id ?? `hand-${handIndex}`
     const sample = samplesRef.current.get(handId) ?? { count: 0, distances: {} }
     const distances = collectOpenHandFingerDistances(handLandmarks)
     Object.entries(distances).forEach(([fingerName, distance]) => {
@@ -630,11 +758,11 @@ function collectCalibrationSamples(landmarks, identities, baselinesRef, samplesR
   setIsCalibrating(false)
 }
 
-function updateHandOctaves(landmarks, identities, handOctaveShiftsRef) {
+function updateHandOctaves(landmarks, handRoles, handOctaveShiftsRef) {
   const activeHandIds = new Set()
   const shifts = landmarks.map((landmarksForHand, handIndex) => {
-    const identity = identities[handIndex]
-    const handId = identity?.id ?? `hand-${handIndex}`
+    const handRole = handRoles[handIndex]
+    const handId = handRole?.id ?? `hand-${handIndex}`
     activeHandIds.add(handId)
     const currentShift = handOctaveShiftsRef.current.get(handId) ?? 0
     const nextShift = getOctaveShiftForWrist(landmarksForHand[0]?.y ?? 0.5, currentShift)
@@ -647,6 +775,20 @@ function updateHandOctaves(landmarks, identities, handOctaveShiftsRef) {
   })
 
   return shifts
+}
+
+function getHandRoles(landmarks, handedness) {
+  return landmarks.map((_, handIndex) => {
+    const detectedSide = handedness[handIndex]?.[0]?.categoryName?.toLowerCase()
+    const side = detectedSide === 'left' || detectedSide === 'right'
+      ? detectedSide
+      : handIndex === 0 ? 'right' : 'left'
+
+    return {
+      color: side === 'right' ? '#a791ff' : '#5be6b3',
+      id: side,
+    }
+  })
 }
 
 export default PerformanceView

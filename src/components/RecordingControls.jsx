@@ -1,10 +1,11 @@
-function RecordingControls({ hasRecording, isRecording, onToggleRecording, onDownload, recordingSaved }) {
+function RecordingControls({ disabled, hasRecording, isRecording, onToggleRecording, onDownload, recordingSaved }) {
   return (
     <div className="ae-recording-controls">
       <button
         className={`ae-record-button ${isRecording ? 'ae-record-button--active' : ''}`}
         type="button"
         onClick={onToggleRecording}
+        disabled={disabled}
       >
         <span className="ae-record-button__dot" aria-hidden="true" />
         {isRecording ? 'Stop recording' : 'Record'}

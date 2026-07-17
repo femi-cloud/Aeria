@@ -7,32 +7,36 @@ const FINGERS = [
 ]
 
 const CHORD_SHAPES = [
-  { fingers: ['thumb', 'middle', 'pinky'], id: 'c-major', name: 'C major', rightNotes: ['C4', 'E4', 'G4'], leftNotes: ['C3', 'E3', 'G3'] },
-  { fingers: ['index', 'ring'], id: 'a-minor', name: 'A minor', rightNotes: ['A3', 'C4', 'E4'], leftNotes: ['A2', 'C3', 'E3'] },
+  { fingers: ['thumb', 'middle', 'pinky'], id: 'c-major', name: 'C major', notes: ['C4', 'E4', 'G4'] },
+  { fingers: ['index', 'ring'], id: 'a-minor', name: 'A minor', notes: ['A4', 'C5', 'E5'] },
 ]
 
-const LEFT_HAND_NOTES = ['C3', 'D3', 'E3', 'G3', 'A3']
-const RIGHT_HAND_NOTES = ['C4', 'D4', 'E4', 'G4', 'A4']
-const PINCH_MELODY_NOTES = ['C4', 'D4', 'E4', 'G4', 'A4', 'C5', 'D5', 'E5', 'G5', 'A5']
+// Together, both hands form one C-major octave: right hand C–G, left hand A–high C.
+const RIGHT_HAND_NOTES = ['C4', 'D4', 'E4', 'F4', 'G4']
+const LEFT_HAND_NOTES = ['A4', 'B4', 'C5']
+const PINCH_MELODY_NOTES = ['C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4', 'C5', 'D5', 'E5', 'F5', 'G5', 'A5', 'B5', 'C6']
 const CURL_THRESHOLD_RATIO = 0.95
 const PINCH_THRESHOLD = 0.06
 const FIST_THRESHOLD_RATIO = 1.1
 const EXTENDED_FINGER_RATIO = 1.2
-const NOTE_ON_RATIO = 0.55
-const NOTE_OFF_RATIO = 0.72
+// Compare against each user's calibrated open-hand distance. A generous note-on
+// threshold makes partial curls feel playable, while the higher release point prevents sticking.
+const NOTE_ON_RATIO = 0.72
+const NOTE_OFF_RATIO = 0.84
 const NOTE_ON_HOLD_MS = 90
 
-export function getCurledFingerNotes(allLandmarks, allHandedness, handIdentities = [], handOctaveShifts = [], stableFingersByHand = []) {
+export function getCurledFingerNotes(allLandmarks, allHandedness, handRoles = [], handOctaveShifts = [], stableFingersByHand = []) {
   return allLandmarks.flatMap((landmarks, handIndex) => {
     const handSide = getHandSide(allHandedness[handIndex], handIndex)
-    const handIdentity = handIdentities[handIndex]
+    const handRole = handRoles[handIndex]
     const notes = shiftNotes(handSide === 'left' ? LEFT_HAND_NOTES : RIGHT_HAND_NOTES, handOctaveShifts[handIndex] ?? 0)
     const curledFingers = stableFingersByHand[handIndex] ?? getCurledFingers(landmarks)
 
     return curledFingers
+      .filter((finger) => notes[finger.noteIndex])
       .map((finger) => ({
-        id: `${handIdentity?.id ?? `${handSide}-${handIndex}`}-${finger.name}`,
-        handColor: handIdentity?.color,
+        id: `${handRole?.id ?? `${handSide}-${handIndex}`}-${finger.name}`,
+        handColor: handRole?.color,
         note: notes[finger.noteIndex],
         octaveShift: handOctaveShifts[handIndex] ?? 0,
         position: landmarks[finger.tip],
@@ -40,20 +44,20 @@ export function getCurledFingerNotes(allLandmarks, allHandedness, handIdentities
   })
 }
 
-export function getCurledFingerChords(allLandmarks, allHandedness, handIdentities = [], handOctaveShifts = [], stableFingersByHand = []) {
+export function getCurledFingerChords(allLandmarks, allHandedness, handRoles = [], handOctaveShifts = [], stableFingersByHand = []) {
   return allLandmarks.flatMap((landmarks, handIndex) => {
     const handSide = getHandSide(allHandedness[handIndex], handIndex)
-    const handIdentity = handIdentities[handIndex]
+    const handRole = handRoles[handIndex]
     const curledFingers = stableFingersByHand[handIndex] ?? getCurledFingers(landmarks)
     const curledFingerNames = curledFingers.map(({ name }) => name)
     const chord = CHORD_SHAPES.find(({ fingers }) => hasExactFingerShape(curledFingerNames, fingers))
     if (!chord) return []
 
     return [{
-      id: `${handIdentity?.id ?? `${handSide}-${handIndex}`}-${chord.id}`,
-      handColor: handIdentity?.color,
+      id: `${handRole?.id ?? `${handSide}-${handIndex}`}-${chord.id}`,
+      handColor: handRole?.color,
       name: chord.name,
-      notes: shiftNotes(handSide === 'left' ? chord.leftNotes : chord.rightNotes, handOctaveShifts[handIndex] ?? 0),
+      notes: shiftNotes(chord.notes, handOctaveShifts[handIndex] ?? 0),
       octaveShift: handOctaveShifts[handIndex] ?? 0,
       position: landmarks[curledFingers[0].tip],
     }]
@@ -122,9 +126,9 @@ export function collectOpenHandFingerDistances(landmarks) {
   ]))
 }
 
-export function getStableCurledFingersByHand(allLandmarks, handIdentities, calibrationBaselines, fingerStates, now = performance.now()) {
+export function getStableCurledFingersByHand(allLandmarks, handRoles, calibrationBaselines, fingerStates, now = performance.now()) {
   return allLandmarks.map((landmarks, handIndex) => {
-    const handId = handIdentities[handIndex]?.id ?? `hand-${handIndex}`
+    const handId = handRoles[handIndex]?.id ?? `hand-${handIndex}`
     const baseline = calibrationBaselines.get(handId)
     const fallbackBaseline = getLandmarkDistance(landmarks[5], landmarks[17]) * 2
 
@@ -187,18 +191,18 @@ export function areBothHandsClosedFists(allLandmarks) {
   return allLandmarks.filter(isClosedFist).length >= 2
 }
 
-export function getOpenPalms(allLandmarks, handIdentities = []) {
+export function getOpenPalms(allLandmarks, handRoles = []) {
   return allLandmarks.flatMap((landmarks, handIndex) => (
     isOpenPalm(landmarks)
-      ? [{ id: handIdentities[handIndex]?.id ?? `hand-${handIndex}`, position: landmarks[9] }]
+      ? [{ id: handRoles[handIndex]?.id ?? `hand-${handIndex}`, position: landmarks[9] }]
       : []
   ))
 }
 
-export function getPeaceSigns(allLandmarks, handIdentities = []) {
+export function getPeaceSigns(allLandmarks, handRoles = []) {
   return allLandmarks.flatMap((landmarks, handIndex) => (
     isPeaceSign(landmarks)
-      ? [{ id: handIdentities[handIndex]?.id ?? `hand-${handIndex}`, position: landmarks[9] }]
+      ? [{ id: handRoles[handIndex]?.id ?? `hand-${handIndex}`, position: landmarks[9] }]
       : []
   ))
 }

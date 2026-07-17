@@ -4,15 +4,16 @@ const MAX_PARTICLES = 120
 const PARTICLES_PER_BURST = 8
 const MIN_LIFESPAN_MS = 1000
 const MAX_LIFESPAN_MS = 1500
-const PITCH_CLASSES = ['C', 'D', 'E', 'G', 'A']
 const LOW_PITCH_COLOR = [72, 59, 196]
 const HIGH_PITCH_COLOR = [255, 199, 73]
+const NOTE_SEMITONES = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }
 
 const ParticleCanvas = forwardRef(function ParticleCanvas({ videoRef }, ref) {
   const canvasRef = useRef(null)
   const particlesRef = useRef([])
 
   useImperativeHandle(ref, () => ({
+    getCanvas: () => canvasRef.current,
     spawnBurst({ handColor, note, position }) {
       if (!position) return
 
@@ -92,9 +93,9 @@ function drawParticles(canvas, particlesRef, deltaSeconds, now) {
 }
 
 function getPitchColor(note) {
-  const pitchClass = note.replace(/[0-9]/g, '')
-  const index = Math.max(PITCH_CLASSES.indexOf(pitchClass), 0)
-  const progress = index / (PITCH_CLASSES.length - 1)
+  const [, pitchClass = 'C', octave = '4'] = note.match(/^([A-G])(?:#|b)?(\d+)$/) ?? []
+  const midi = (Number(octave) + 1) * 12 + (NOTE_SEMITONES[pitchClass] ?? 0)
+  const progress = Math.min(Math.max((midi - 60) / 12, 0), 1)
 
   return LOW_PITCH_COLOR.map((channel, colorIndex) => (
     Math.round(channel + (HIGH_PITCH_COLOR[colorIndex] - channel) * progress)
