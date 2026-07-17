@@ -8,7 +8,10 @@ export async function createHandLandmarker() {
   const vision = await FilesetResolver.forVisionTasks(WASM_ROOT)
 
   return HandLandmarker.createFromOptions(vision, {
-    baseOptions: { modelAssetPath: HAND_LANDMARKER_MODEL },
+    baseOptions: {
+      delegate: 'GPU',
+      modelAssetPath: HAND_LANDMARKER_MODEL,
+    },
     runningMode: 'VIDEO',
     numHands: 4,
     minHandDetectionConfidence: 0.6,

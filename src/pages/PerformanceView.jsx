@@ -1,20 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import HandTracker from '../components/HandTracker.jsx'
 import InstrumentBadge from '../components/InstrumentBadge.jsx'
+import CalibrationOverlay from '../components/CalibrationOverlay.jsx'
 import OnboardingOverlay from '../components/OnboardingOverlay.jsx'
 import ParticleCanvas from '../components/ParticleCanvas.jsx'
 import RecordingControls from '../components/RecordingControls.jsx'
 import WaveformBar from '../components/WaveformBar.jsx'
-import { areBothHandsClosedFists, getCurledFingerChords, getCurledFingerNotes, getOpenPalms, getPeaceSigns, getRightHand, isPinching, mapRightHandToNote } from '../lib/gestureMapping.js'
-import { activateSustain, cycleInstrument, disposeMusicEngine, playPentatonicArpeggio, startAudioRecording, startMusicEngine, stopAudioRecording, stopPlayedNotes, updateChordNotes, updateFingerNotes, updatePinchNote } from '../lib/musicEngine.js'
+import { areBothHandsClosedFists, collectOpenHandFingerDistances, getCurledFingerChords, getCurledFingerNotes, getLeftHand, getMicroVibratoAmount, getOctaveShiftForWrist, getOpenPalms, getPeaceSigns, getRightHand, getStableCurledFingersByHand, isPinching, mapLeftHandDistanceToVolume, mapRightHandToNote, mapThereminFilterCutoff, mapThereminFrequency, mapThereminPan } from '../lib/gestureMapping.js'
+import { activateSustain, cycleInstrument, disposeMusicEngine, playPentatonicArpeggio, startAudioRecording, startMusicEngine, stopAudioRecording, stopPlayedNotes, updateChordNotes, updateFingerNotes, updatePinchNote, updateTheremin } from '../lib/musicEngine.js'
 import { createRhythmDetector } from '../lib/rhythmDetection.js'
 
 const cameraConstraints = {
   audio: false,
   video: {
     facingMode: 'user',
-    width: { ideal: 1280 },
-    height: { ideal: 720 },
+    width: { ideal: 640, max: 640 },
+    height: { ideal: 480, max: 480 },
   },
 }
 
@@ -42,6 +43,15 @@ function PerformanceView() {
   const openPalmTriggeredRef = useRef(new Set())
   const peaceSignStartedAtRef = useRef(new Map())
   const peaceSignTriggeredRef = useRef(new Set())
+  const handOctaveShiftsRef = useRef(new Map())
+  const thereminYSamplesRef = useRef([])
+  const calibrationBaselinesRef = useRef(new Map())
+  const calibrationSamplesRef = useRef(new Map())
+  const calibrationStartedAtRef = useRef(null)
+  const calibrationHasRunRef = useRef(false)
+  const isCalibratingRef = useRef(false)
+  const fingerCurlStatesRef = useRef(new Map())
+  const lastCalibrationProgressRef = useRef(0)
   const [cameraState, setCameraState] = useState('idle')
   const [errorMessage, setErrorMessage] = useState('')
   const [trackingError, setTrackingError] = useState('')
@@ -61,6 +71,10 @@ function PerformanceView() {
   const [recordingBlob, setRecordingBlob] = useState(null)
   const [recordingSaved, setRecordingSaved] = useState(false)
   const [isSustainActive, setIsSustainActive] = useState(false)
+  const [handOctaveIndicators, setHandOctaveIndicators] = useState([])
+  const [thereminPitch, setThereminPitch] = useState(null)
+  const [isCalibrating, setIsCalibrating] = useState(false)
+  const [calibrationProgress, setCalibrationProgress] = useState(0)
 
   const handleTrackingError = useCallback((message) => {
     setTrackingError(message)
@@ -87,6 +101,23 @@ function PerformanceView() {
   }, [])
 
   const handleHandResults = useCallback(({ landmarks, handedness, identities }) => {
+    const handOctaveShifts = updateHandOctaves(landmarks, identities, handOctaveShiftsRef)
+    const nextOctaveIndicators = identities.map((identity, handIndex) => ({
+      color: identity.color,
+      id: identity.id,
+      shift: handOctaveShifts[handIndex],
+    }))
+    setHandOctaveIndicators((currentIndicators) => (
+      currentIndicators.map(({ id, shift }) => `${id}:${shift}`).join('|') === nextOctaveIndicators.map(({ id, shift }) => `${id}:${shift}`).join('|')
+        ? currentIndicators
+        : nextOctaveIndicators
+    ))
+
+    if (isCalibratingRef.current) {
+      collectCalibrationSamples(landmarks, identities, calibrationBaselinesRef, calibrationSamplesRef, calibrationStartedAtRef, calibrationHasRunRef, isCalibratingRef, lastCalibrationProgressRef, setCalibrationProgress, setIsCalibrating)
+      return
+    }
+
     if (areBothHandsClosedFists(landmarks)) {
       if (!fistStartedAtRef.current) fistStartedAtRef.current = performance.now()
 
@@ -107,6 +138,32 @@ function PerformanceView() {
 
     fistStartedAtRef.current = null
     fistSwitchTriggeredRef.current = false
+
+    if (controlModeRef.current === 'theremin') {
+      const rightHand = getRightHand(landmarks, handedness)
+      const leftHand = getLeftHand(landmarks, handedness)
+      if (rightHand) {
+        const frequency = mapThereminFrequency(rightHand)
+        thereminYSamplesRef.current = [...thereminYSamplesRef.current, { y: rightHand[0].y }].slice(-8)
+        updateTheremin({
+          cutoff: mapThereminFilterCutoff(rightHand),
+          frequency,
+          pan: mapThereminPan(rightHand),
+          vibratoAmount: getMicroVibratoAmount(thereminYSamplesRef.current),
+          volume: leftHand ? mapLeftHandDistanceToVolume(leftHand) : -12,
+        })
+        setThereminPitch((currentPitch) => (
+          Math.abs((currentPitch ?? 0) - frequency) < 1 ? currentPitch : frequency
+        ))
+      } else {
+        stopPlayedNotes()
+        thereminYSamplesRef.current = []
+        setThereminPitch(null)
+      }
+      setActiveNotes((currentNotes) => (currentNotes.length ? [] : currentNotes))
+      setActiveNoteDetails((currentNotes) => (currentNotes.length ? [] : currentNotes))
+      return
+    }
 
     processHeldGesture(getOpenPalms(landmarks, identities), openPalmStartedAtRef, openPalmTriggeredRef, OPEN_PALM_HOLD_DURATION_MS, triggerSustain)
     const peaceSigns = getPeaceSigns(landmarks, identities)
@@ -130,7 +187,8 @@ function PerformanceView() {
     if (controlModeRef.current === 'pinch') {
       const rightHand = getRightHand(landmarks, handedness)
       const pinching = rightHand ? isPinching(rightHand) : false
-      const note = rightHand ? mapRightHandToNote(rightHand) : undefined
+      const handIndex = landmarks.indexOf(rightHand)
+      const note = rightHand ? mapRightHandToNote(rightHand, handOctaveShifts[handIndex]) : undefined
       if (pinching && !pinchWasActiveRef.current) {
         particleCanvasRef.current?.spawnBurst({ note, position: rightHand[8] })
         registerNoteOnset()
@@ -143,7 +201,6 @@ function PerformanceView() {
       setActiveNotes((currentNotes) => (
         currentNotes.join('|') === nextActiveNotes.join('|') ? currentNotes : nextActiveNotes
       ))
-      const handIndex = landmarks.indexOf(rightHand)
       const handColor = identities[handIndex]?.color
       setActiveNoteDetails((currentNotes) => (
         currentNotes.length === nextActiveNotes.length && currentNotes[0]?.note === nextActiveNotes[0] && currentNotes[0]?.color === handColor
@@ -153,9 +210,15 @@ function PerformanceView() {
       return
     }
 
+    const stableFingersByHand = getStableCurledFingersByHand(
+      landmarks,
+      identities,
+      calibrationBaselinesRef.current,
+      fingerCurlStatesRef.current,
+    )
     const triggeredItems = playModeRef.current === 'chords'
-      ? getCurledFingerChords(landmarks, handedness, identities)
-      : getCurledFingerNotes(landmarks, handedness, identities)
+      ? getCurledFingerChords(landmarks, handedness, identities, handOctaveShifts, stableFingersByHand)
+      : getCurledFingerNotes(landmarks, handedness, identities, handOctaveShifts, stableFingersByHand)
     const nextFingerIds = new Set(triggeredItems.map(({ id }) => id))
     let didTriggerNote = false
     triggeredItems.forEach((item) => {
@@ -195,6 +258,8 @@ function PerformanceView() {
     pinchWasActiveRef.current = false
     setActiveNotes([])
     setActiveNoteDetails([])
+    setThereminPitch(null)
+    thereminYSamplesRef.current = []
   }, [controlMode])
 
   useEffect(() => {
@@ -207,7 +272,9 @@ function PerformanceView() {
 
   useEffect(() => {
     if (cameraState === 'active') {
-      setShowOnboarding(sessionStorage.getItem('aeria-onboarding-complete') !== 'true')
+      const hasCompletedOnboarding = sessionStorage.getItem('aeria-onboarding-complete') === 'true'
+      setShowOnboarding(!hasCompletedOnboarding)
+      if (hasCompletedOnboarding) beginCalibration()
     }
   }, [cameraState])
 
@@ -263,6 +330,19 @@ function PerformanceView() {
   function startPerformance() {
     sessionStorage.setItem('aeria-onboarding-complete', 'true')
     setShowOnboarding(false)
+    beginCalibration()
+  }
+
+  function beginCalibration() {
+    if (calibrationHasRunRef.current) return
+
+    calibrationHasRunRef.current = true
+    isCalibratingRef.current = true
+    calibrationSamplesRef.current = new Map()
+    calibrationStartedAtRef.current = null
+    fingerCurlStatesRef.current = new Map()
+    setCalibrationProgress(0)
+    setIsCalibrating(true)
   }
 
   function retryHandTracking() {
@@ -348,6 +428,11 @@ function PerformanceView() {
             <ParticleCanvas ref={particleCanvasRef} videoRef={videoRef} />
             <InstrumentBadge instrumentName={activeInstrument} pulseId={instrumentPulseId} />
             {isSustainActive && <p className="ae-sustain-indicator">Sustain active</p>}
+            <div className="ae-octave-indicators" aria-label="Hand octave shifts">
+              {handOctaveIndicators.map(({ color, id, shift }, index) => (
+                <span key={id} style={{ borderColor: color, color }}>H{index + 1} {shift > 0 ? `+${shift}` : shift}</span>
+              ))}
+            </div>
             <p className="ae-active-notes">
               Active notes <strong>{activeNoteDetails.length
                 ? activeNoteDetails.map(({ color, id, note }) => (
@@ -355,6 +440,9 @@ function PerformanceView() {
                 ))
                 : activeNotes.length ? activeNotes.join(' · ') : '—'}</strong>
             </p>
+            {controlMode === 'theremin' && thereminPitch && (
+              <p className="ae-theremin-readout">Theremin+ <strong>{Math.round(thereminPitch)} Hz</strong></p>
+            )}
           </>
         )}
         {cameraState !== 'active' && (
@@ -393,6 +481,7 @@ function PerformanceView() {
           </div>
         )}
         {cameraState === 'active' && showOnboarding && <OnboardingOverlay onStart={startPerformance} />}
+        {cameraState === 'active' && !showOnboarding && isCalibrating && <CalibrationOverlay progress={calibrationProgress} />}
       </section>
 
       <section className="ae-console" aria-label="Performance controls">
@@ -412,6 +501,14 @@ function PerformanceView() {
             aria-pressed={controlMode === 'pinch'}
           >
             Pinch melody
+          </button>
+          <button
+            className={`ae-control-mode__button ${controlMode === 'theremin' ? 'ae-control-mode__button--active' : ''}`}
+            type="button"
+            onClick={() => setControlMode('theremin')}
+            aria-pressed={controlMode === 'theremin'}
+          >
+            Theremin+
           </button>
         </div>
         {controlMode === 'piano' && (
@@ -450,7 +547,9 @@ function PerformanceView() {
             ? playMode === 'chords'
               ? 'Chord shapes: thumb + middle + pinky for C major; index + ring for A minor.'
               : 'Curl a finger toward your palm to play; use both hands for chords.'
-            : 'Move your right hand up or down to choose a pentatonic note, then pinch to play it.'}
+            : controlMode === 'theremin'
+              ? 'Theremin+: right hand controls pitch, pan, tone, and vibrato; left hand controls volume.'
+              : 'Move your right hand up or down to choose a pentatonic note, then pinch to play it.'}
         </p>
       )}
       {audioError && <p className="ae-audio-error">{audioError}</p>}
@@ -492,6 +591,62 @@ function processHeldGesture(gestures, startedAtRef, triggeredRef, holdDuration, 
       triggeredRef.current.delete(id)
     }
   })
+}
+
+function collectCalibrationSamples(landmarks, identities, baselinesRef, samplesRef, startedAtRef, hasRunRef, isCalibratingRef, lastProgressRef, setProgress, setIsCalibrating) {
+  if (!landmarks.length) return
+
+  const now = performance.now()
+  if (startedAtRef.current === null) startedAtRef.current = now
+
+  landmarks.forEach((handLandmarks, handIndex) => {
+    const handId = identities[handIndex]?.id ?? `hand-${handIndex}`
+    const sample = samplesRef.current.get(handId) ?? { count: 0, distances: {} }
+    const distances = collectOpenHandFingerDistances(handLandmarks)
+    Object.entries(distances).forEach(([fingerName, distance]) => {
+      sample.distances[fingerName] = (sample.distances[fingerName] ?? 0) + distance
+    })
+    sample.count += 1
+    samplesRef.current.set(handId, sample)
+  })
+
+  const progress = Math.min((now - startedAtRef.current) / 2000, 1)
+  if (now - lastProgressRef.current > 100 || progress === 1) {
+    lastProgressRef.current = now
+    setProgress(progress)
+  }
+
+  if (progress < 1) return
+
+  const baselines = new Map()
+  samplesRef.current.forEach((sample, handId) => {
+    baselines.set(handId, Object.fromEntries(
+      Object.entries(sample.distances).map(([fingerName, total]) => [fingerName, total / sample.count]),
+    ))
+  })
+  baselinesRef.current = baselines
+  hasRunRef.current = true
+  isCalibratingRef.current = false
+  setIsCalibrating(false)
+}
+
+function updateHandOctaves(landmarks, identities, handOctaveShiftsRef) {
+  const activeHandIds = new Set()
+  const shifts = landmarks.map((landmarksForHand, handIndex) => {
+    const identity = identities[handIndex]
+    const handId = identity?.id ?? `hand-${handIndex}`
+    activeHandIds.add(handId)
+    const currentShift = handOctaveShiftsRef.current.get(handId) ?? 0
+    const nextShift = getOctaveShiftForWrist(landmarksForHand[0]?.y ?? 0.5, currentShift)
+    handOctaveShiftsRef.current.set(handId, nextShift)
+    return nextShift
+  })
+
+  handOctaveShiftsRef.current.forEach((_, handId) => {
+    if (!activeHandIds.has(handId)) handOctaveShiftsRef.current.delete(handId)
+  })
+
+  return shifts
 }
 
 export default PerformanceView

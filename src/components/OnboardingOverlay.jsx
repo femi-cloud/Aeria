@@ -7,6 +7,7 @@ function OnboardingOverlay({ onStart }) {
         <p><span aria-hidden="true">☝</span><strong>Curl a finger</strong> to play a note or chord.</p>
         <p><span aria-hidden="true">✊</span><strong>Make two fists</strong> and hold to switch instruments.</p>
         <p><span aria-hidden="true">↕</span><strong>Move your left hand</strong> to shape volume and reverb.</p>
+        <p><span aria-hidden="true">✦</span><strong>Try Theremin+</strong>—inspired by professional gestural MIDI controllers, translated into a free browser instrument.</p>
       </div>
       <button className="ae-button" type="button" onClick={onStart}>Start playing</button>
     </section>

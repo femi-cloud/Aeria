@@ -7,6 +7,11 @@ let activeInstrument
 let activeInstrumentIndex = 0
 let recorder
 let sustainTimeout
+let thereminSynth
+let thereminFilter
+let thereminPanner
+let thereminVibrato
+let isThereminPlaying = false
 const activeFingerNotes = new Map()
 const activeChordNotes = new Map()
 let activePinchNote
@@ -131,26 +136,65 @@ export function playPentatonicArpeggio() {
   })
 }
 
+export function updateTheremin({ cutoff, frequency, pan, vibratoAmount, volume }) {
+  if (!thereminSynth) {
+    thereminSynth = new Tone.Synth({
+      oscillator: { type: 'sine' },
+      envelope: { attack: 0.04, decay: 0, release: 0.16, sustain: 1 },
+      portamento: 0.08,
+    })
+    thereminFilter = new Tone.Filter(1200, 'lowpass')
+    thereminPanner = new Tone.Panner(0).toDestination()
+    thereminVibrato = new Tone.LFO({ frequency: 5.2, min: 0, max: 0 }).connect(thereminSynth.detune).start()
+    thereminSynth.chain(thereminFilter, thereminPanner)
+  }
+
+  thereminSynth.volume.rampTo(volume, 0.06)
+  thereminPanner.pan.rampTo(pan, 0.06)
+  thereminFilter.frequency.rampTo(cutoff, 0.08)
+  const vibratoCents = vibratoAmount * 16
+  thereminVibrato.min = -vibratoCents
+  thereminVibrato.max = vibratoCents
+  if (!isThereminPlaying) {
+    thereminSynth.triggerAttack(frequency)
+    isThereminPlaying = true
+    return
+  }
+
+  thereminSynth.frequency.rampTo(frequency, 0.08)
+}
+
+export function stopTheremin() {
+  if (thereminSynth && isThereminPlaying) thereminSynth.triggerRelease()
+  isThereminPlaying = false
+}
+
 export function stopPlayedNotes() {
   const synth = activeInstrument?.synth
-  if (!synth) return
-
-  activeFingerNotes.forEach((note) => synth.triggerRelease(note))
-  activeFingerNotes.clear()
-
-  activeChordNotes.forEach((notes) => notes.forEach((note) => synth.triggerRelease(note)))
-  activeChordNotes.clear()
-
-  if (activePinchNote) {
-    synth.triggerRelease(activePinchNote)
-    activePinchNote = undefined
+  if (synth) {
+    activeFingerNotes.forEach((note) => synth.triggerRelease(note))
+    activeChordNotes.forEach((notes) => notes.forEach((note) => synth.triggerRelease(note)))
+    if (activePinchNote) synth.triggerRelease(activePinchNote)
   }
+  activeFingerNotes.clear()
+  activeChordNotes.clear()
+  activePinchNote = undefined
+  stopTheremin()
 }
 
 export function disposeMusicEngine() {
   stopPlayedNotes()
   clearTimeout(sustainTimeout)
   disposeActiveInstrument()
+  stopTheremin()
+  thereminSynth?.dispose()
+  thereminFilter?.dispose()
+  thereminPanner?.dispose()
+  thereminVibrato?.dispose()
+  thereminSynth = undefined
+  thereminFilter = undefined
+  thereminPanner = undefined
+  thereminVibrato = undefined
   if (recorder) {
     Tone.Destination.disconnect(recorder)
     recorder.dispose()

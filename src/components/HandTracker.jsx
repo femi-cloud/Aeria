@@ -3,12 +3,13 @@ import { createHandLandmarker, HandLandmarker } from '../lib/handTracking.js'
 
 const HAND_COLORS = ['#a791ff', '#5be6b3']
 const HAND_IDENTITY_COLORS = ['#a791ff', '#5be6b3', '#ff9d68', '#68c8ff']
-const LOG_INTERVAL_MS = 500
+const LOG_INTERVAL_MS = 1000
 
 function HandTracker({ videoRef, onError, onResults, reloadKey }) {
   const canvasRef = useRef(null)
   const lastLogTimeRef = useRef(0)
   const hasHandsRef = useRef(false)
+  const lastVideoTimeRef = useRef(-1)
   const previousHandsRef = useRef([])
   const nextHandIdRef = useRef(1)
   const [isLoading, setIsLoading] = useState(true)
@@ -16,6 +17,7 @@ function HandTracker({ videoRef, onError, onResults, reloadKey }) {
 
   useEffect(() => {
     let animationFrameId
+    let videoFrameCallbackId
     let handLandmarker
     let isDisposed = false
 
@@ -30,7 +32,7 @@ function HandTracker({ videoRef, onError, onResults, reloadKey }) {
         }
 
         setIsLoading(false)
-        detectHands()
+        scheduleNextDetection()
       } catch (error) {
         if (!isDisposed) {
           setIsLoading(false)
@@ -45,8 +47,10 @@ function HandTracker({ videoRef, onError, onResults, reloadKey }) {
 
       const video = videoRef.current
       const canvas = canvasRef.current
-      if (video && canvas && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      const hasNewVideoFrame = video?.currentTime !== lastVideoTimeRef.current
+      if (video && canvas && hasNewVideoFrame && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
         try {
+          lastVideoTimeRef.current = video.currentTime
           const results = handLandmarker.detectForVideo(video, performance.now())
           const landmarks = results.landmarks ?? []
           const identities = assignHandIdentities(landmarks, results.handedness ?? [], previousHandsRef, nextHandIdRef)
@@ -62,7 +66,16 @@ function HandTracker({ videoRef, onError, onResults, reloadKey }) {
         }
       }
 
-      animationFrameId = requestAnimationFrame(detectHands)
+      scheduleNextDetection()
+    }
+
+    function scheduleNextDetection() {
+      const video = videoRef.current
+      if (video?.requestVideoFrameCallback) {
+        videoFrameCallbackId = video.requestVideoFrameCallback(detectHands)
+      } else {
+        animationFrameId = requestAnimationFrame(detectHands)
+      }
     }
 
     function updateHandHint(nextHasHands) {
@@ -85,6 +98,7 @@ function HandTracker({ videoRef, onError, onResults, reloadKey }) {
     return () => {
       isDisposed = true
       cancelAnimationFrame(animationFrameId)
+      videoRef.current?.cancelVideoFrameCallback?.(videoFrameCallbackId)
       handLandmarker?.close()
     }
   }, [onError, onResults, reloadKey, videoRef])

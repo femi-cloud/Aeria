@@ -18,29 +18,33 @@ const CURL_THRESHOLD_RATIO = 0.95
 const PINCH_THRESHOLD = 0.06
 const FIST_THRESHOLD_RATIO = 1.1
 const EXTENDED_FINGER_RATIO = 1.2
+const NOTE_ON_RATIO = 0.55
+const NOTE_OFF_RATIO = 0.72
+const NOTE_ON_HOLD_MS = 90
 
-export function getCurledFingerNotes(allLandmarks, allHandedness, handIdentities = []) {
+export function getCurledFingerNotes(allLandmarks, allHandedness, handIdentities = [], handOctaveShifts = [], stableFingersByHand = []) {
   return allLandmarks.flatMap((landmarks, handIndex) => {
     const handSide = getHandSide(allHandedness[handIndex], handIndex)
     const handIdentity = handIdentities[handIndex]
-    const notes = handSide === 'left' ? LEFT_HAND_NOTES : RIGHT_HAND_NOTES
-    const curledFingers = getCurledFingers(landmarks)
+    const notes = shiftNotes(handSide === 'left' ? LEFT_HAND_NOTES : RIGHT_HAND_NOTES, handOctaveShifts[handIndex] ?? 0)
+    const curledFingers = stableFingersByHand[handIndex] ?? getCurledFingers(landmarks)
 
     return curledFingers
       .map((finger) => ({
         id: `${handIdentity?.id ?? `${handSide}-${handIndex}`}-${finger.name}`,
         handColor: handIdentity?.color,
         note: notes[finger.noteIndex],
+        octaveShift: handOctaveShifts[handIndex] ?? 0,
         position: landmarks[finger.tip],
       }))
   })
 }
 
-export function getCurledFingerChords(allLandmarks, allHandedness, handIdentities = []) {
+export function getCurledFingerChords(allLandmarks, allHandedness, handIdentities = [], handOctaveShifts = [], stableFingersByHand = []) {
   return allLandmarks.flatMap((landmarks, handIndex) => {
     const handSide = getHandSide(allHandedness[handIndex], handIndex)
     const handIdentity = handIdentities[handIndex]
-    const curledFingers = getCurledFingers(landmarks)
+    const curledFingers = stableFingersByHand[handIndex] ?? getCurledFingers(landmarks)
     const curledFingerNames = curledFingers.map(({ name }) => name)
     const chord = CHORD_SHAPES.find(({ fingers }) => hasExactFingerShape(curledFingerNames, fingers))
     if (!chord) return []
@@ -49,27 +53,128 @@ export function getCurledFingerChords(allLandmarks, allHandedness, handIdentitie
       id: `${handIdentity?.id ?? `${handSide}-${handIndex}`}-${chord.id}`,
       handColor: handIdentity?.color,
       name: chord.name,
-      notes: handSide === 'left' ? chord.leftNotes : chord.rightNotes,
+      notes: shiftNotes(handSide === 'left' ? chord.leftNotes : chord.rightNotes, handOctaveShifts[handIndex] ?? 0),
+      octaveShift: handOctaveShifts[handIndex] ?? 0,
       position: landmarks[curledFingers[0].tip],
     }]
   })
 }
 
 export function getRightHand(allLandmarks, allHandedness) {
-  const rightHandIndex = allHandedness.findIndex((hand) => getHandSide(hand) === 'right')
-  if (rightHandIndex >= 0) return allLandmarks[rightHandIndex]
+  return getHandBySide(allLandmarks, allHandedness, 'right')
+}
+
+export function getLeftHand(allLandmarks, allHandedness) {
+  return getHandBySide(allLandmarks, allHandedness, 'left')
+}
+
+export function mapThereminFrequency(landmarks) {
+  const normalizedY = clamp(landmarks[0]?.y ?? 1, 0, 1)
+  const lowestMidi = 48
+  const highestMidi = 84
+  const midi = lowestMidi + (1 - normalizedY) * (highestMidi - lowestMidi)
+  return 440 * 2 ** ((midi - 69) / 12)
+}
+
+export function mapLeftHandDistanceToVolume(landmarks) {
+  const normalizedDistance = clamp(Math.abs((landmarks[0]?.x ?? 0.5) - 0.5) / 0.5, 0, 1)
+  return -28 + normalizedDistance * 24
+}
+
+export function mapThereminPan(landmarks) {
+  return clamp(((landmarks[0]?.x ?? 0.5) - 0.5) * 2, -1, 1)
+}
+
+export function mapThereminFilterCutoff(landmarks) {
+  const wrist = landmarks[0]
+  const middleMcp = landmarks[9]
+  if (!wrist || !middleMcp) return 1200
+
+  const tiltAngle = Math.atan2(middleMcp.y - wrist.y, middleMcp.x - wrist.x)
+  const normalizedTilt = clamp((tiltAngle + Math.PI) / (Math.PI * 2), 0, 1)
+  return 280 + normalizedTilt * 5200
+}
+
+export function getMicroVibratoAmount(samples) {
+  if (samples.length < 6) return 0
+
+  const recentSamples = samples.slice(-8)
+  const values = recentSamples.map(({ y }) => y)
+  const range = Math.max(...values) - Math.min(...values)
+  let directionChanges = 0
+  let previousDirection = 0
+
+  for (let index = 1; index < values.length; index += 1) {
+    const direction = Math.sign(values[index] - values[index - 1])
+    if (direction && previousDirection && direction !== previousDirection) directionChanges += 1
+    if (direction) previousDirection = direction
+  }
+
+  return range >= 0.006 && range <= 0.07 && directionChanges >= 2
+    ? clamp((range - 0.006) / 0.064, 0, 1)
+    : 0
+}
+
+export function collectOpenHandFingerDistances(landmarks) {
+  return Object.fromEntries(FINGERS.map((finger) => [
+    finger.name,
+    getLandmarkDistance(landmarks[finger.tip], landmarks[finger.knuckle]),
+  ]))
+}
+
+export function getStableCurledFingersByHand(allLandmarks, handIdentities, calibrationBaselines, fingerStates, now = performance.now()) {
+  return allLandmarks.map((landmarks, handIndex) => {
+    const handId = handIdentities[handIndex]?.id ?? `hand-${handIndex}`
+    const baseline = calibrationBaselines.get(handId)
+    const fallbackBaseline = getLandmarkDistance(landmarks[5], landmarks[17]) * 2
+
+    return FINGERS.filter((finger) => {
+      const key = `${handId}-${finger.name}`
+      const distance = getLandmarkDistance(landmarks[finger.tip], landmarks[finger.knuckle])
+      const openDistance = baseline?.[finger.name] ?? fallbackBaseline
+      const state = fingerStates.get(key) ?? { isCurled: false, startedAt: null }
+
+      if (state.isCurled) {
+        if (distance >= openDistance * NOTE_OFF_RATIO) {
+          state.isCurled = false
+          state.startedAt = null
+        }
+      } else if (distance <= openDistance * NOTE_ON_RATIO) {
+        if (state.startedAt === null) state.startedAt = now
+        if (now - state.startedAt >= NOTE_ON_HOLD_MS) state.isCurled = true
+      } else {
+        state.startedAt = null
+      }
+
+      fingerStates.set(key, state)
+      return state.isCurled
+    })
+  })
+}
+
+function getHandBySide(allLandmarks, allHandedness, side) {
+  const handIndex = allHandedness.findIndex((hand) => getHandSide(hand) === side)
+  if (handIndex >= 0) return allLandmarks[handIndex]
 
   return allLandmarks.length === 1 ? allLandmarks[0] : null
 }
 
-export function mapRightHandToNote(landmarks) {
+export function mapRightHandToNote(landmarks, octaveShift = 0) {
   const normalizedY = clamp(landmarks[0]?.y ?? 1, 0, 1)
   const noteIndex = Math.min(
     PINCH_MELODY_NOTES.length - 1,
     Math.floor((1 - normalizedY) * PINCH_MELODY_NOTES.length),
   )
 
-  return PINCH_MELODY_NOTES[noteIndex]
+  return shiftNotes([PINCH_MELODY_NOTES[noteIndex]], octaveShift)[0]
+}
+
+export function getOctaveShiftForWrist(wristY, currentShift = 0) {
+  if (currentShift === 1) return wristY > 0.44 ? (wristY > 0.72 ? -1 : 0) : 1
+  if (currentShift === -1) return wristY < 0.56 ? (wristY < 0.28 ? 1 : 0) : -1
+  if (wristY < 0.28) return 1
+  if (wristY > 0.72) return -1
+  return 0
 }
 
 export function isPinching(landmarks) {
@@ -180,4 +285,8 @@ function getPalmCenter(landmarks) {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max)
+}
+
+function shiftNotes(notes, octaveShift) {
+  return notes.map((note) => note.replace(/(\d+)$/, (octave) => String(Number(octave) + octaveShift)))
 }
