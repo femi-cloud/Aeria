@@ -10,7 +10,7 @@ export async function createHandLandmarker() {
   return HandLandmarker.createFromOptions(vision, {
     baseOptions: { modelAssetPath: HAND_LANDMARKER_MODEL },
     runningMode: 'VIDEO',
-    numHands: 2,
+    numHands: 4,
     minHandDetectionConfidence: 0.6,
     minHandPresenceConfidence: 0.6,
     minTrackingConfidence: 0.5,

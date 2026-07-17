@@ -1,9 +1,12 @@
 import * as Tone from 'tone'
 
 const INSTRUMENTS = ['Piano', 'Pad', 'Bells', 'Violin']
+const PENTATONIC_ARPEGGIO = ['C4', 'D4', 'E4', 'G4', 'A4', 'C5', 'D5', 'E5', 'G5', 'A5']
 
 let activeInstrument
 let activeInstrumentIndex = 0
+let recorder
+let sustainTimeout
 const activeFingerNotes = new Map()
 const activeChordNotes = new Map()
 let activePinchNote
@@ -20,6 +23,26 @@ export function cycleInstrument() {
   ensureActiveInstrument()
 
   return INSTRUMENTS[activeInstrumentIndex]
+}
+
+export async function startAudioRecording() {
+  await Tone.start()
+
+  if (!Tone.Recorder.supported) {
+    throw new Error('This browser does not support audio recording.')
+  }
+
+  if (!recorder) {
+    recorder = new Tone.Recorder()
+    Tone.Destination.connect(recorder)
+  }
+
+  await recorder.start()
+}
+
+export async function stopAudioRecording() {
+  if (!recorder || recorder.state !== 'started') return null
+  return recorder.stop()
 }
 
 export function updateFingerNotes(nextFingerNotes) {
@@ -85,6 +108,29 @@ export function updateChordNotes(nextChords) {
   return [...activeChordNotes.values()].flat()
 }
 
+export function activateSustain(durationMs = 3200) {
+  const instrument = activeInstrument
+  if (!instrument) return
+
+  instrument.synth.set({ envelope: { release: Math.max(instrument.release * 3, 2.8) } })
+  clearTimeout(sustainTimeout)
+  sustainTimeout = setTimeout(() => {
+    if (activeInstrument === instrument) {
+      instrument.synth.set({ envelope: { release: instrument.release } })
+    }
+  }, durationMs)
+}
+
+export function playPentatonicArpeggio() {
+  const synth = activeInstrument?.synth
+  if (!synth) return
+
+  const startTime = Tone.now()
+  PENTATONIC_ARPEGGIO.forEach((note, index) => {
+    synth.triggerAttackRelease(note, 0.16, startTime + index * 0.1)
+  })
+}
+
 export function stopPlayedNotes() {
   const synth = activeInstrument?.synth
   if (!synth) return
@@ -103,7 +149,13 @@ export function stopPlayedNotes() {
 
 export function disposeMusicEngine() {
   stopPlayedNotes()
+  clearTimeout(sustainTimeout)
   disposeActiveInstrument()
+  if (recorder) {
+    Tone.Destination.disconnect(recorder)
+    recorder.dispose()
+  }
+  recorder = undefined
 }
 
 function ensureActiveInstrument() {
@@ -127,7 +179,7 @@ function createPiano() {
   }).toDestination()
   synth.volume.value = -10
 
-  return { synth, effects: [] }
+  return { synth, effects: [], release: 0.7 }
 }
 
 function createPad() {
@@ -140,7 +192,7 @@ function createPad() {
   synth.chain(chorus, reverb, Tone.Destination)
   synth.volume.value = -13
 
-  return { synth, effects: [chorus, reverb] }
+  return { synth, effects: [chorus, reverb], release: 3.2 }
 }
 
 function createBells() {
@@ -154,7 +206,7 @@ function createBells() {
   }).toDestination()
   synth.volume.value = -12
 
-  return { synth, effects: [] }
+  return { synth, effects: [], release: 0.7 }
 }
 
 function createViolin() {
@@ -164,7 +216,7 @@ function createViolin() {
   }).toDestination()
   synth.volume.value = -14
 
-  return { synth, effects: [] }
+  return { synth, effects: [], release: 0.9 }
 }
 
 function disposeActiveInstrument() {

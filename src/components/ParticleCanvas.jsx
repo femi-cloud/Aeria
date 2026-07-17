@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
 
-const MAX_PARTICLES = 150
+const MAX_PARTICLES = 120
+const PARTICLES_PER_BURST = 8
 const MIN_LIFESPAN_MS = 1000
 const MAX_LIFESPAN_MS = 1500
 const PITCH_CLASSES = ['C', 'D', 'E', 'G', 'A']
@@ -12,11 +13,11 @@ const ParticleCanvas = forwardRef(function ParticleCanvas({ videoRef }, ref) {
   const particlesRef = useRef([])
 
   useImperativeHandle(ref, () => ({
-    spawnBurst({ note, position }) {
+    spawnBurst({ handColor, note, position }) {
       if (!position) return
 
       const color = getPitchColor(note)
-      const newParticles = Array.from({ length: 12 }, () => createParticle(position, color))
+      const newParticles = Array.from({ length: PARTICLES_PER_BURST }, () => createParticle(position, color, handColor))
       particlesRef.current = [...particlesRef.current, ...newParticles].slice(-MAX_PARTICLES)
     },
   }), [])
@@ -49,13 +50,14 @@ const ParticleCanvas = forwardRef(function ParticleCanvas({ videoRef }, ref) {
   return <canvas ref={canvasRef} className="ae-particle-canvas" aria-hidden="true" />
 })
 
-function createParticle(position, color) {
+function createParticle(position, color, handColor) {
   const lifespan = MIN_LIFESPAN_MS + Math.random() * (MAX_LIFESPAN_MS - MIN_LIFESPAN_MS)
   const angle = Math.random() * Math.PI * 2
   const speed = 0.025 + Math.random() * 0.06
 
   return {
     color,
+    handColor,
     createdAt: performance.now(),
     lifespan,
     size: 3 + Math.random() * 4,
@@ -80,9 +82,12 @@ function drawParticles(canvas, particlesRef, deltaSeconds, now) {
 
     const life = 1 - (now - particle.createdAt) / particle.lifespan
     context.fillStyle = `rgba(${particle.color.join(', ')}, ${life * 0.85})`
+    context.strokeStyle = particle.handColor ?? context.fillStyle
+    context.lineWidth = 1.25
     context.beginPath()
     context.arc(particle.x * canvas.width, particle.y * canvas.height, particle.size * life, 0, Math.PI * 2)
     context.fill()
+    if (particle.handColor) context.stroke()
   })
 }
 

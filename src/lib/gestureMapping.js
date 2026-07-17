@@ -17,32 +17,37 @@ const PINCH_MELODY_NOTES = ['C4', 'D4', 'E4', 'G4', 'A4', 'C5', 'D5', 'E5', 'G5'
 const CURL_THRESHOLD_RATIO = 0.95
 const PINCH_THRESHOLD = 0.06
 const FIST_THRESHOLD_RATIO = 1.1
+const EXTENDED_FINGER_RATIO = 1.2
 
-export function getCurledFingerNotes(allLandmarks, allHandedness) {
+export function getCurledFingerNotes(allLandmarks, allHandedness, handIdentities = []) {
   return allLandmarks.flatMap((landmarks, handIndex) => {
     const handSide = getHandSide(allHandedness[handIndex], handIndex)
+    const handIdentity = handIdentities[handIndex]
     const notes = handSide === 'left' ? LEFT_HAND_NOTES : RIGHT_HAND_NOTES
     const curledFingers = getCurledFingers(landmarks)
 
     return curledFingers
       .map((finger) => ({
-        id: `${handSide}-${finger.name}`,
+        id: `${handIdentity?.id ?? `${handSide}-${handIndex}`}-${finger.name}`,
+        handColor: handIdentity?.color,
         note: notes[finger.noteIndex],
         position: landmarks[finger.tip],
       }))
   })
 }
 
-export function getCurledFingerChords(allLandmarks, allHandedness) {
+export function getCurledFingerChords(allLandmarks, allHandedness, handIdentities = []) {
   return allLandmarks.flatMap((landmarks, handIndex) => {
     const handSide = getHandSide(allHandedness[handIndex], handIndex)
+    const handIdentity = handIdentities[handIndex]
     const curledFingers = getCurledFingers(landmarks)
     const curledFingerNames = curledFingers.map(({ name }) => name)
     const chord = CHORD_SHAPES.find(({ fingers }) => hasExactFingerShape(curledFingerNames, fingers))
     if (!chord) return []
 
     return [{
-      id: `${handSide}-${chord.id}`,
+      id: `${handIdentity?.id ?? `${handSide}-${handIndex}`}-${chord.id}`,
+      handColor: handIdentity?.color,
       name: chord.name,
       notes: handSide === 'left' ? chord.leftNotes : chord.rightNotes,
       position: landmarks[curledFingers[0].tip],
@@ -74,7 +79,23 @@ export function isPinching(landmarks) {
 }
 
 export function areBothHandsClosedFists(allLandmarks) {
-  return allLandmarks.length >= 2 && allLandmarks.every(isClosedFist)
+  return allLandmarks.filter(isClosedFist).length >= 2
+}
+
+export function getOpenPalms(allLandmarks, handIdentities = []) {
+  return allLandmarks.flatMap((landmarks, handIndex) => (
+    isOpenPalm(landmarks)
+      ? [{ id: handIdentities[handIndex]?.id ?? `hand-${handIndex}`, position: landmarks[9] }]
+      : []
+  ))
+}
+
+export function getPeaceSigns(allLandmarks, handIdentities = []) {
+  return allLandmarks.flatMap((landmarks, handIndex) => (
+    isPeaceSign(landmarks)
+      ? [{ id: handIdentities[handIndex]?.id ?? `hand-${handIndex}`, position: landmarks[9] }]
+      : []
+  ))
 }
 
 function isClosedFist(landmarks) {
@@ -85,6 +106,31 @@ function isClosedFist(landmarks) {
   return [4, 8, 12, 16, 20].every((tipIndex) => (
     getLandmarkDistance(landmarks[tipIndex], palmCenter) < palmWidth * FIST_THRESHOLD_RATIO
   ))
+}
+
+function isOpenPalm(landmarks) {
+  const palmWidth = getLandmarkDistance(landmarks[5], landmarks[17])
+  if (!palmWidth) return false
+
+  const fingertips = FINGERS.map(({ tip }) => landmarks[tip]).filter(Boolean)
+  const isFlatToCamera = Math.max(...fingertips.map(({ z }) => z)) - Math.min(...fingertips.map(({ z }) => z)) < 0.3
+  return isFlatToCamera && FINGERS.every((finger) => (
+    getLandmarkDistance(landmarks[finger.tip], landmarks[finger.knuckle]) > palmWidth * EXTENDED_FINGER_RATIO
+  ))
+}
+
+function isPeaceSign(landmarks) {
+  const palmWidth = getLandmarkDistance(landmarks[5], landmarks[17])
+  if (!palmWidth) return false
+
+  const isIndexExtended = isFingerExtended(landmarks, FINGERS[1], palmWidth)
+  const isMiddleExtended = isFingerExtended(landmarks, FINGERS[2], palmWidth)
+  const curledFingers = [FINGERS[0], FINGERS[3], FINGERS[4]]
+  return isIndexExtended && isMiddleExtended && curledFingers.every((finger) => isFingerCurled(landmarks, finger, palmWidth))
+}
+
+function isFingerExtended(landmarks, finger, palmWidth) {
+  return getLandmarkDistance(landmarks[finger.tip], landmarks[finger.knuckle]) > palmWidth * EXTENDED_FINGER_RATIO
 }
 
 function isFingerCurled(landmarks, finger, palmWidth) {
