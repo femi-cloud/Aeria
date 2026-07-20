@@ -94,6 +94,15 @@ h1 { font-family: 'Space Grotesk', sans-serif; font-size: 1.35rem; letter-spacin
 .ae-status, .ae-audio-error { color: #8B87A8; font-size: .75rem; justify-self: center; margin: 0; text-align: center; }
 .ae-status span { color: #F5C77E; }
 .ae-audio-error { color: #ffb6c2; }
+.ae-debug-panel { background: #0B0B14f2; border: 1px solid #7C6FFF88; border-radius: .55rem; bottom: .8rem; box-shadow: 0 .8rem 2rem #0008; color: #F2F0FA; font-family: 'IBM Plex Mono', monospace; font-size: .62rem; max-height: min(58dvh, 31rem); overflow: auto; padding: .55rem; position: fixed; right: .8rem; width: min(28rem, calc(100vw - 1.6rem)); z-index: 20; }
+.ae-debug-panel__title { color: #F5C77E; font-weight: 700; margin: 0; }
+.ae-debug-panel__legend { color: #8B87A8; margin: .18rem 0 .45rem; }
+.ae-debug-panel__hand { border-left: 2px solid var(--ae-debug-color); margin-top: .45rem; padding-left: .4rem; }
+.ae-debug-panel__hand strong { color: var(--ae-debug-color); text-transform: capitalize; }
+.ae-debug-panel__row { align-items: center; display: grid; gap: .35rem; grid-template-columns: 3.8rem 1fr 1.6rem; line-height: 1.65; }
+.ae-debug-panel__row code { color: #c7c1d8; font-family: inherit; white-space: nowrap; }
+.ae-debug-panel__state { color: #8B87A8; text-align: right; }
+.ae-debug-panel__state--on { color: #7ff0c1; }
 
 .ae-onboarding { align-items: center; background: linear-gradient(145deg, #171227f7, #0B0B14f6); display: flex; flex-direction: column; inset: 0; justify-content: center; padding: clamp(1.5rem, 5vw, 3rem); position: absolute; text-align: center; z-index: 8; }
 .ae-onboarding__eyebrow { color: #7C6FFF; font-family: 'IBM Plex Mono', monospace; font-size: .65rem; font-weight: 700; letter-spacing: .13em; margin: 0 0 .5rem; text-transform: uppercase; }

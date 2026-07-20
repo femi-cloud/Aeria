@@ -3,12 +3,13 @@ import HandTracker from '../components/HandTracker.jsx'
 import InstrumentBadge from '../components/InstrumentBadge.jsx'
 import InstrumentVisuals from '../components/InstrumentVisuals.jsx'
 import CalibrationOverlay from '../components/CalibrationOverlay.jsx'
+import FingerCurlDebugPanel from '../components/FingerCurlDebugPanel.jsx'
 import OnboardingOverlay from '../components/OnboardingOverlay.jsx'
 import ParticleCanvas from '../components/ParticleCanvas.jsx'
 import RecordingControls from '../components/RecordingControls.jsx'
 import RecordingCanvas from '../components/RecordingCanvas.jsx'
 import WaveformBar from '../components/WaveformBar.jsx'
-import { areBothHandsClosedFists, collectOpenHandFingerDistances, getCurledFingerChords, getCurledFingerNotes, getLeftHand, getMicroVibratoAmount, getOctaveShiftForWrist, getOpenPalms, getPeaceSigns, getRightHand, getStableCurledFingersByHand, isPinching, mapLeftHandDistanceToVolume, mapRightHandToNote, mapThereminFilterCutoff, mapThereminFrequency, mapThereminPan } from '../lib/gestureMapping.js'
+import { areBothHandsClosedFists, collectOpenHandFingerDistances, getCurledFingerChords, getCurledFingerNotes, getFingerCurlDebugData, getLeftHand, getMicroVibratoAmount, getOctaveShiftForWrist, getOpenPalms, getPeaceSigns, getRightHand, getStableCurledFingersByHand, isPinching, mapLeftHandDistanceToVolume, mapRightHandToNote, mapThereminFilterCutoff, mapThereminFrequency, mapThereminPan } from '../lib/gestureMapping.js'
 import { activateSustain, createRecordingAudioStream, cycleInstrument, disposeMusicEngine, disposeRecordingAudioStream, playMajorArpeggio, startMusicEngine, stopPlayedNotes, updateChordNotes, updateFingerNotes, updatePinchNote, updateTheremin } from '../lib/musicEngine.js'
 import { createRhythmDetector } from '../lib/rhythmDetection.js'
 
@@ -26,6 +27,7 @@ const MAX_RECORDING_DURATION_MS = 60000
 const OPEN_PALM_HOLD_DURATION_MS = 500
 const PEACE_SIGN_HOLD_DURATION_MS = 350
 const C_MAJOR_SCALE = ['C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4', 'C5']
+const IS_DEVELOPMENT = import.meta.env.DEV
 
 function PerformanceView() {
   const videoRef = useRef(null)
@@ -85,6 +87,7 @@ function PerformanceView() {
   const [calibrationProgress, setCalibrationProgress] = useState(0)
   const [instrumentVisualEvents, setInstrumentVisualEvents] = useState([])
   const [thereminVisual, setThereminVisual] = useState(null)
+  const [fingerCurlDebugData, setFingerCurlDebugData] = useState([])
 
   const handleTrackingError = useCallback((message) => {
     setTrackingError(message)
@@ -238,6 +241,14 @@ function PerformanceView() {
       calibrationBaselinesRef.current,
       fingerCurlStatesRef.current,
     )
+    if (IS_DEVELOPMENT) {
+      setFingerCurlDebugData(getFingerCurlDebugData(
+        landmarks,
+        handRoles,
+        calibrationBaselinesRef.current,
+        fingerCurlStatesRef.current,
+      ))
+    }
     const triggeredItems = playModeRef.current === 'chords'
       ? getCurledFingerChords(landmarks, handedness, handRoles, handOctaveShifts, stableFingersByHand)
       : getCurledFingerNotes(landmarks, handedness, handRoles, handOctaveShifts, stableFingersByHand)
@@ -309,7 +320,7 @@ function PerformanceView() {
   useEffect(() => {
     return () => {
       const recorder = mediaRecorderRef.current
-      if (recorder?.state !== 'inactive') {
+      if (recorder && recorder.state !== 'inactive') {
         recorder.onstop = null
         recorder.stop()
       }
@@ -671,6 +682,9 @@ function PerformanceView() {
         </p>
       )}
       {audioError && <p className="ae-audio-error">{audioError}</p>}
+      {IS_DEVELOPMENT && cameraState === 'active' && !showOnboarding && (
+        <FingerCurlDebugPanel hands={fingerCurlDebugData} />
+      )}
     </main>
   )
 }
@@ -725,6 +739,17 @@ function collectCalibrationSamples(landmarks, handRoles, baselinesRef, samplesRe
   if (!landmarks.length) return
 
   const now = performance.now()
+  const hasBothHands = ['left', 'right'].every((handId) => handRoles.some((handRole) => handRole.id === handId))
+  if (!hasBothHands) {
+    startedAtRef.current = null
+    samplesRef.current = new Map()
+    if (lastProgressRef.current !== 0) {
+      lastProgressRef.current = 0
+      setProgress(0)
+    }
+    return
+  }
+
   if (startedAtRef.current === null) startedAtRef.current = now
 
   landmarks.forEach((handLandmarks, handIndex) => {

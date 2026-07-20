@@ -43,11 +43,11 @@ Curl a finger toward your palm to play a note in one continuous C-major octave.
 
 | Finger | Right hand | Left hand |
 | --- | --- | --- |
-| Thumb | C4 | A4 |
-| Index | D4 | B4 |
-| Middle | E4 | C5 |
-| Ring | F4 | — |
-| Pinky | G4 | — |
+| Thumb | A4 | G4 |
+| Index | B4 | F4 |
+| Middle | C5 | E4 |
+| Ring | — | D4 |
+| Pinky | — | C4 |
 
 Use multiple curled fingers—and multiple hands—for chords.
 

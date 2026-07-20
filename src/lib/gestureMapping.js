@@ -11,33 +11,40 @@ const CHORD_SHAPES = [
   { fingers: ['index', 'ring'], id: 'a-minor', name: 'A minor', notes: ['A4', 'C5', 'E5'] },
 ]
 
-// Together, both hands form one C-major octave: right hand C–G, left hand A–high C.
-const RIGHT_HAND_NOTES = ['C4', 'D4', 'E4', 'F4', 'G4']
-const LEFT_HAND_NOTES = ['A4', 'B4', 'C5']
+// The visible keyboard ascends left to right: left hand plays C–G and right
+// hand plays A–high C, matching the mirrored webcam presentation.
+const LEFT_HAND_NOTES = ['C4', 'D4', 'E4', 'F4', 'G4']
+const RIGHT_HAND_NOTES = ['A4', 'B4', 'C5']
 const PINCH_MELODY_NOTES = ['C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4', 'C5', 'D5', 'E5', 'F5', 'G5', 'A5', 'B5', 'C6']
 const CURL_THRESHOLD_RATIO = 0.95
 const PINCH_THRESHOLD = 0.06
 const FIST_THRESHOLD_RATIO = 1.1
 const EXTENDED_FINGER_RATIO = 1.2
-// Compare against each user's calibrated open-hand distance. A generous note-on
-// threshold makes partial curls feel playable, while the higher release point prevents sticking.
-const NOTE_ON_RATIO = 0.72
-const NOTE_OFF_RATIO = 0.84
+// Each finger is measured against its own open-hand baseline. The thumb uses
+// palm-center distance; all other fingers use tip-to-MCP distance. In both
+// cases, a larger value means more extended and a smaller value means curled.
+const NOTE_ON_RATIO = 0.6
+const NOTE_OFF_RATIO = 0.75
 const NOTE_ON_HOLD_MS = 90
 
 export function getCurledFingerNotes(allLandmarks, allHandedness, handRoles = [], handOctaveShifts = [], stableFingersByHand = []) {
   return allLandmarks.flatMap((landmarks, handIndex) => {
-    const handSide = getHandSide(allHandedness[handIndex], handIndex)
     const handRole = handRoles[handIndex]
+    const handSide = handRole?.id ?? getHandSide(allHandedness[handIndex], handIndex)
     const notes = shiftNotes(handSide === 'left' ? LEFT_HAND_NOTES : RIGHT_HAND_NOTES, handOctaveShifts[handIndex] ?? 0)
     const curledFingers = stableFingersByHand[handIndex] ?? getCurledFingers(landmarks)
 
     return curledFingers
-      .filter((finger) => notes[finger.noteIndex])
+      .map((finger) => ({
+        ...finger,
+        mappedNoteIndex: getFingerNoteIndex(handSide, finger, notes.length),
+      }))
+      .filter((finger) => notes[finger.mappedNoteIndex])
       .map((finger) => ({
         id: `${handRole?.id ?? `${handSide}-${handIndex}`}-${finger.name}`,
         handColor: handRole?.color,
-        note: notes[finger.noteIndex],
+        // Left-hand fingers mirror piano fingering: pinky is lowest, thumb is highest.
+        note: notes[finger.mappedNoteIndex],
         octaveShift: handOctaveShifts[handIndex] ?? 0,
         position: landmarks[finger.tip],
       }))
@@ -122,7 +129,7 @@ export function getMicroVibratoAmount(samples) {
 export function collectOpenHandFingerDistances(landmarks) {
   return Object.fromEntries(FINGERS.map((finger) => [
     finger.name,
-    getLandmarkDistance(landmarks[finger.tip], landmarks[finger.knuckle]),
+    getFingerCurlDistance(landmarks, finger),
   ]))
 }
 
@@ -130,12 +137,12 @@ export function getStableCurledFingersByHand(allLandmarks, handRoles, calibratio
   return allLandmarks.map((landmarks, handIndex) => {
     const handId = handRoles[handIndex]?.id ?? `hand-${handIndex}`
     const baseline = calibrationBaselines.get(handId)
-    const fallbackBaseline = getLandmarkDistance(landmarks[5], landmarks[17]) * 2
+    if (!hasFingerBaselines(baseline)) return []
 
     return FINGERS.filter((finger) => {
       const key = `${handId}-${finger.name}`
-      const distance = getLandmarkDistance(landmarks[finger.tip], landmarks[finger.knuckle])
-      const openDistance = baseline?.[finger.name] ?? fallbackBaseline
+      const distance = getFingerCurlDistance(landmarks, finger)
+      const openDistance = baseline[finger.name]
       const state = fingerStates.get(key) ?? { isCurled: false, startedAt: null }
 
       if (state.isCurled) {
@@ -153,6 +160,35 @@ export function getStableCurledFingersByHand(allLandmarks, handRoles, calibratio
       fingerStates.set(key, state)
       return state.isCurled
     })
+  })
+}
+
+export function getFingerCurlDebugData(allLandmarks, handRoles, calibrationBaselines, fingerStates) {
+  return allLandmarks.map((landmarks, handIndex) => {
+    const handId = handRoles[handIndex]?.id ?? `hand-${handIndex}`
+    const handSide = handRoles[handIndex]?.id ?? (handIndex === 0 ? 'right' : 'left')
+    const baseline = calibrationBaselines.get(handId)
+    const notes = handSide === 'left' ? LEFT_HAND_NOTES : RIGHT_HAND_NOTES
+
+    return {
+      color: handRoles[handIndex]?.color,
+      id: handId,
+      fingers: FINGERS.map((finger) => {
+        const openDistance = baseline?.[finger.name]
+        const distance = getFingerCurlDistance(landmarks, finger)
+        const state = fingerStates.get(`${handId}-${finger.name}`)
+        const note = notes[getFingerNoteIndex(handSide, finger, notes.length)]
+
+        return {
+          distance,
+          name: finger.name,
+          note,
+          noteOffThreshold: Number.isFinite(openDistance) ? openDistance * NOTE_OFF_RATIO : null,
+          noteOnThreshold: Number.isFinite(openDistance) ? openDistance * NOTE_ON_RATIO : null,
+          triggered: Boolean(note && state?.isCurled),
+        }
+      }),
+    }
   })
 }
 
@@ -239,16 +275,14 @@ function isPeaceSign(landmarks) {
 }
 
 function isFingerExtended(landmarks, finger, palmWidth) {
-  return getLandmarkDistance(landmarks[finger.tip], landmarks[finger.knuckle]) > palmWidth * EXTENDED_FINGER_RATIO
+  return getFingerCurlDistance(landmarks, finger) > palmWidth * EXTENDED_FINGER_RATIO
 }
 
 function isFingerCurled(landmarks, finger, palmWidth) {
-  const fingertip = landmarks[finger.tip]
-  const lowerKnuckle = landmarks[finger.knuckle]
-  if (!fingertip || !lowerKnuckle || !palmWidth) return false
+  if (!palmWidth) return false
 
   // Scaling the threshold by palm width keeps the gesture consistent at different distances from the camera.
-  return getLandmarkDistance(fingertip, lowerKnuckle) < palmWidth * CURL_THRESHOLD_RATIO
+  return getFingerCurlDistance(landmarks, finger) < palmWidth * CURL_THRESHOLD_RATIO
 }
 
 function getCurledFingers(landmarks) {
@@ -261,6 +295,10 @@ function hasExactFingerShape(curledFingerNames, expectedFingerNames) {
     && expectedFingerNames.every((fingerName) => curledFingerNames.includes(fingerName))
 }
 
+function getFingerNoteIndex(handSide, finger, noteCount) {
+  return handSide === 'left' ? noteCount - 1 - finger.noteIndex : finger.noteIndex
+}
+
 function getHandSide(handedness, handIndex = 0) {
   const label = (handedness?.[0]?.categoryName ?? handedness?.[0]?.displayName ?? '').toLowerCase()
   if (label === 'left' || label === 'right') return label
@@ -271,6 +309,18 @@ function getHandSide(handedness, handIndex = 0) {
 function getLandmarkDistance(first, second) {
   if (!first || !second) return 0
   return Math.hypot(first.x - second.x, first.y - second.y, first.z - second.z)
+}
+
+function getFingerCurlDistance(landmarks, finger) {
+  const fingertip = landmarks[finger.tip]
+  if (!fingertip) return 0
+
+  if (finger.name === 'thumb') return getLandmarkDistance(fingertip, getPalmCenter(landmarks))
+  return getLandmarkDistance(fingertip, landmarks[finger.knuckle])
+}
+
+function hasFingerBaselines(baseline) {
+  return FINGERS.every((finger) => Number.isFinite(baseline?.[finger.name]) && baseline[finger.name] > 0)
 }
 
 function getPalmCenter(landmarks) {

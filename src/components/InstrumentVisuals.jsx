@@ -1,5 +1,5 @@
-const RIGHT_HAND_SCALE = ['C4', 'D4', 'E4', 'F4', 'G4']
-const LEFT_HAND_SCALE = ['A4', 'B4', 'C5']
+const LEFT_HAND_SCALE = ['C4', 'D4', 'E4', 'F4', 'G4']
+const RIGHT_HAND_SCALE = ['A4', 'B4', 'C5']
 const RIGHT_HAND_COLOR = '#a791ff'
 const LEFT_HAND_COLOR = '#5be6b3'
 
@@ -69,8 +69,8 @@ function getKeyboardNotes(handOctaves) {
   const leftHand = handOctaves.find(({ id, side }) => id === 'left' || side?.toLowerCase() === 'left')
 
   return [
-    ...createScaleKeys(RIGHT_HAND_SCALE, rightHand, 'right', RIGHT_HAND_COLOR),
     ...createScaleKeys(LEFT_HAND_SCALE, leftHand, 'left', LEFT_HAND_COLOR),
+    ...createScaleKeys(RIGHT_HAND_SCALE, rightHand, 'right', RIGHT_HAND_COLOR),
   ]
 }
 

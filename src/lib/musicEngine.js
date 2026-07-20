@@ -1,8 +1,8 @@
-import * as Tone from 'tone'
-
 const INSTRUMENTS = ['Piano', 'Pad', 'Bells', 'Violin']
 const C_MAJOR_ARPEGGIO = ['C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4', 'C5', 'D5', 'E5', 'F5', 'G5', 'A5', 'B5', 'C6']
 
+let Tone
+let toneLoadPromise
 let activeInstrument
 let activeInstrumentIndex = 0
 let recordingAudioDestination
@@ -17,11 +17,14 @@ const activeChordNotes = new Map()
 let activePinchNote
 
 export async function startMusicEngine() {
+  Tone = await loadTone()
   await Tone.start()
   ensureActiveInstrument()
 }
 
 export function cycleInstrument() {
+  if (!Tone) return INSTRUMENTS[activeInstrumentIndex]
+
   stopPlayedNotes()
   disposeActiveInstrument()
   activeInstrumentIndex = (activeInstrumentIndex + 1) % INSTRUMENTS.length
@@ -46,7 +49,7 @@ export function createRecordingAudioStream() {
 export function disposeRecordingAudioStream() {
   if (!recordingAudioDestination) return
 
-  Tone.Destination.disconnect(recordingAudioDestination)
+  if (Tone) Tone.Destination.disconnect(recordingAudioDestination)
   recordingAudioDestination.disconnect()
   recordingAudioDestination = undefined
 }
@@ -138,6 +141,8 @@ export function playMajorArpeggio() {
 }
 
 export function updateTheremin({ cutoff, frequency, pan, vibratoAmount, volume }) {
+  if (!Tone) return
+
   if (!thereminSynth) {
     thereminSynth = new Tone.Synth({
       oscillator: { type: 'sine' },
@@ -204,6 +209,13 @@ function ensureActiveInstrument() {
 
   const instrumentName = INSTRUMENTS[activeInstrumentIndex]
   activeInstrument = createInstrument(instrumentName)
+}
+
+async function loadTone() {
+  if (Tone) return Tone
+
+  toneLoadPromise ??= import('tone')
+  return toneLoadPromise
 }
 
 function createInstrument(instrumentName) {

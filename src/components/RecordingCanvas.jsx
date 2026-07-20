@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
 
-const RIGHT_HAND_SCALE = ['C4', 'D4', 'E4', 'F4', 'G4']
-const LEFT_HAND_SCALE = ['A4', 'B4', 'C5']
+const LEFT_HAND_SCALE = ['C4', 'D4', 'E4', 'F4', 'G4']
+const RIGHT_HAND_SCALE = ['A4', 'B4', 'C5']
 
 const RecordingCanvas = forwardRef(function RecordingCanvas({ activeInstrument, activeNotes, handOctaves, isVideoHidden, mode, particleCanvasRef, thereminState, triggerEvents, videoRef, handCanvasRef }, ref) {
   const canvasRef = useRef(null)
@@ -199,8 +199,8 @@ function getScaleKeys(handOctaves = []) {
   const rightHand = handOctaves.find(({ id, side }) => id === 'right' || side?.toLowerCase() === 'right')
   const leftHand = handOctaves.find(({ id, side }) => id === 'left' || side?.toLowerCase() === 'left')
   return [
-    ...makeKeys(RIGHT_HAND_SCALE, rightHand, '#a791ff'),
     ...makeKeys(LEFT_HAND_SCALE, leftHand, '#5be6b3'),
+    ...makeKeys(RIGHT_HAND_SCALE, rightHand, '#a791ff'),
   ]
 }
 
