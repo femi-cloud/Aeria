@@ -116,6 +116,19 @@ src/
 - Canvas for skeletons, particles, recording compositing, and performance visuals
 - Plain CSS with Google Fonts
 
+## Built with Codex
+
+Aeria was built end-to-end in collaboration with Codex, across multiple sessions, using GPT-5.6. Codex accelerated the initial scaffold (project structure, camera permission flow) in minutes, which freed up time for the harder problem: turning raw MediaPipe hand landmarks into something that reliably sounds like music.
+
+Key product and engineering decisions made along the way:
+
+- **Constraining gestures to a musical scale.** An early free-pitch mapping sounded chaotic regardless of hand precision, so notes were constrained first to a pentatonic scale, then expanded to a full two-hand C-major layout — trading unlimited pitch freedom for guaranteed musical coherence.
+- **Pivoting away from paid API dependencies.** Aeria's first concept relied on a paid OpenAI API call for real-time analysis. After hitting API credit limits mid-hackathon, the project was rebuilt around a fully local, browser-only architecture — more reliable for a live demo and zero-cost to run.
+- **Iterative gesture-detection debugging.** Reliable finger-curl detection required several rounds of work with Codex: per-finger calibration (rather than one global threshold), hysteresis between trigger and release thresholds, confidence-based frame filtering, and a debug overlay built specifically to diagnose false triggers by inspecting live distance/threshold values rather than guessing.
+- **Design system built from scratch.** Rather than a default theme, Codex helped implement a dedicated color palette, typography pairing, and signature visual elements (the tempo-reactive waveform bar, pseudo-3D instrument visuals) to give the project a coherent, intentional identity.
+
+The majority of Aeria's core functionality was built in the Codex session referenced by the /feedback Session ID in this submission.
+
 ## Demo tips
 
 - Use even, front-facing lighting and a clear background for the most reliable detection.
