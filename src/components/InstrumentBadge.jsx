@@ -1,7 +1,7 @@
-function InstrumentBadge({ instrumentName, pulseId }) {
+function InstrumentBadge({ instrumentName, label = 'Instrument', pulseId }) {
   return (
     <p key={pulseId} className="ae-instrument-badge">
-      Instrument <strong>{instrumentName}</strong>
+      {label} <strong>{instrumentName}</strong>
     </p>
   )
 }

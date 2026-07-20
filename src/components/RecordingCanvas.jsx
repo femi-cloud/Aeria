@@ -3,7 +3,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
 const LEFT_HAND_SCALE = ['C4', 'D4', 'E4', 'F4', 'G4']
 const RIGHT_HAND_SCALE = ['A4', 'B4', 'C5']
 
-const RecordingCanvas = forwardRef(function RecordingCanvas({ activeInstrument, activeNotes, handOctaves, isVideoHidden, mode, particleCanvasRef, thereminState, triggerEvents, videoRef, handCanvasRef }, ref) {
+const RecordingCanvas = forwardRef(function RecordingCanvas({ activeInstrument, activeNotes, handOctaves, isRecording, isVideoHidden, mode, particleCanvasRef, thereminState, triggerEvents, videoRef, handCanvasRef }, ref) {
   const canvasRef = useRef(null)
   const visualStateRef = useRef({})
 
@@ -14,15 +14,24 @@ const RecordingCanvas = forwardRef(function RecordingCanvas({ activeInstrument, 
   useImperativeHandle(ref, () => ({
     captureStream(frameRate = 30) {
       const canvas = canvasRef.current
-      if (!canvas?.width || !canvas?.height || !canvas.captureStream) {
+      const video = videoRef.current
+      if (!canvas || !video?.videoWidth || !video?.videoHeight || !canvas.captureStream) {
         throw new Error('The performance video stream is not ready yet.')
       }
+
+      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+        canvas.width = video.videoWidth
+        canvas.height = video.videoHeight
+      }
+      drawCurrentFrame(canvas, video, handCanvasRef.current?.getCanvas?.(), particleCanvasRef.current?.getCanvas?.(), visualStateRef.current, performance.now())
 
       return canvas.captureStream(frameRate)
     },
   }), [])
 
   useEffect(() => {
+    if (!isRecording) return undefined
+
     let animationFrameId
 
     function render(now) {
@@ -34,17 +43,7 @@ const RecordingCanvas = forwardRef(function RecordingCanvas({ activeInstrument, 
           canvas.height = video.videoHeight
         }
 
-        const context = canvas.getContext('2d')
-        drawPerformanceFrame(
-          context,
-          canvas.width,
-          canvas.height,
-          video,
-          handCanvasRef.current?.getCanvas?.(),
-          particleCanvasRef.current?.getCanvas?.(),
-          visualStateRef.current,
-          now,
-        )
+        drawCurrentFrame(canvas, video, handCanvasRef.current?.getCanvas?.(), particleCanvasRef.current?.getCanvas?.(), visualStateRef.current, now)
       }
 
       animationFrameId = requestAnimationFrame(render)
@@ -52,10 +51,15 @@ const RecordingCanvas = forwardRef(function RecordingCanvas({ activeInstrument, 
 
     animationFrameId = requestAnimationFrame(render)
     return () => cancelAnimationFrame(animationFrameId)
-  }, [handCanvasRef, particleCanvasRef, videoRef])
+  }, [handCanvasRef, isRecording, particleCanvasRef, videoRef])
 
   return <canvas ref={canvasRef} className="ae-recording-canvas" aria-hidden="true" />
 })
+
+function drawCurrentFrame(canvas, video, handCanvas, particleCanvas, state, now) {
+  const context = canvas.getContext('2d')
+  drawPerformanceFrame(context, canvas.width, canvas.height, video, handCanvas, particleCanvas, state, now)
+}
 
 function drawPerformanceFrame(context, width, height, video, handCanvas, particleCanvas, state, now) {
   context.clearRect(0, 0, width, height)
@@ -70,7 +74,7 @@ function drawPerformanceFrame(context, width, height, video, handCanvas, particl
   drawCanvasLayer(context, particleCanvas, width, height)
   context.restore()
 
-  drawInstrumentVisual(context, width, height, state)
+  drawInstrumentVisual(context, width, height, state, now)
   drawWaveform(context, width, height, Boolean(state.activeNotes?.length), now)
 }
 
@@ -78,9 +82,9 @@ function drawCanvasLayer(context, source, width, height) {
   if (source?.width && source?.height) context.drawImage(source, 0, 0, width, height)
 }
 
-function drawInstrumentVisual(context, width, height, state) {
+function drawInstrumentVisual(context, width, height, state, now) {
   if (state.mode === 'theremin') {
-    drawTheremin(context, width, height, state.thereminState)
+    drawTheremin(context, width, height, state.thereminState, now)
     return
   }
 
@@ -158,14 +162,50 @@ function drawPadRipples(context, width, height, events = []) {
   context.globalAlpha = 1
 }
 
-function drawTheremin(context, width, height, state = {}) {
+function drawTheremin(context, width, height, state = {}, now = performance.now()) {
   const intensity = state.intensity ?? .18
   const pitch = state.pitch ?? .5
+  const volume = state.volume ?? .1
+  const flowSpeed = state.flowSpeed ?? .75
+  const hue = 225 - pitch * 182
+  const color = `hsl(${hue} 90% 68%)`
+  const hotColor = `hsl(${hue} 96% 78%)`
   const glow = context.createRadialGradient(pitch * width, height * .55, 0, pitch * width, height * .55, width * .42)
-  glow.addColorStop(0, `rgba(245, 199, 126, ${intensity * .5})`)
-  glow.addColorStop(1, 'rgba(124, 111, 255, 0)')
+  glow.addColorStop(0, `hsla(${hue} 96% 78% / ${intensity * .56})`)
+  glow.addColorStop(.42, `hsla(${hue} 90% 68% / ${intensity * .18})`)
+  glow.addColorStop(1, `hsla(${hue} 90% 68% / 0)`)
   context.fillStyle = glow
   context.fillRect(0, 0, width, height)
+
+  const waveCount = 5 + Math.round(volume * 5)
+  for (let index = 0; index < waveCount; index += 1) {
+    const baseY = height * (.36 + index * .042)
+    const amplitude = height * (.012 + volume * .026)
+    context.beginPath()
+    for (let x = width * .1; x <= width * .9; x += 10) {
+      const phase = x / width * (5 + pitch * 8) + now * .0022 * flowSpeed + index * .8
+      const y = baseY + Math.sin(phase) * amplitude
+      if (x === width * .1) context.moveTo(x, y)
+      else context.lineTo(x, y)
+    }
+    context.strokeStyle = color
+    context.globalAlpha = intensity * (.2 + index / (waveCount * 2.8))
+    context.lineWidth = 1 + volume
+    context.stroke()
+  }
+
+  const particleCount = 7 + Math.round(volume * 17)
+  for (let index = 0; index < particleCount; index += 1) {
+    const progress = ((now * .00018 * flowSpeed) + index / particleCount) % 1
+    const x = width * (.09 + progress * .82)
+    const y = height * (.28 + ((index * .173) % .42)) + Math.sin(now * .003 + index * 2.1) * height * .025
+    context.fillStyle = index % 3 ? color : hotColor
+    context.globalAlpha = intensity * Math.sin(Math.PI * progress)
+    context.beginPath()
+    context.arc(x, y, 1.4 + volume * 1.8, 0, Math.PI * 2)
+    context.fill()
+  }
+  context.globalAlpha = 1
 
   ;[width * .08, width * .92].forEach((x) => {
     context.strokeStyle = '#d8d2f4'
@@ -174,7 +214,7 @@ function drawTheremin(context, width, height, state = {}) {
     context.moveTo(x, height - 34)
     context.lineTo(x + (x < width / 2 ? -18 : 18), height * .36)
     context.stroke()
-    context.strokeStyle = '#F5C77E'
+    context.strokeStyle = hotColor
     context.lineWidth = 3
     context.beginPath()
     context.arc(x + (x < width / 2 ? -18 : 18), height * .36, 12, 0, Math.PI * 2)

@@ -1,3 +1,5 @@
+import { memo } from 'react'
+
 const BARS = Array.from({ length: 42 })
 
 function WaveformBar({ bpm, isActive }) {
@@ -12,4 +14,4 @@ function WaveformBar({ bpm, isActive }) {
   )
 }
 
-export default WaveformBar
+export default memo(WaveformBar)

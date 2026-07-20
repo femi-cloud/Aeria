@@ -27,7 +27,7 @@ const MAX_RECORDING_DURATION_MS = 60000
 const OPEN_PALM_HOLD_DURATION_MS = 500
 const PEACE_SIGN_HOLD_DURATION_MS = 350
 const C_MAJOR_SCALE = ['C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4', 'C5']
-const IS_DEVELOPMENT = import.meta.env.DEV
+const IS_FINGER_DEBUG_ENABLED = import.meta.env.DEV && import.meta.env.VITE_AERIA_DEBUG === 'true'
 
 function PerformanceView() {
   const videoRef = useRef(null)
@@ -62,6 +62,7 @@ function PerformanceView() {
   const isCalibratingRef = useRef(false)
   const fingerCurlStatesRef = useRef(new Map())
   const lastCalibrationProgressRef = useRef(0)
+  const showFingerDebugRef = useRef(false)
   const [cameraState, setCameraState] = useState('idle')
   const [errorMessage, setErrorMessage] = useState('')
   const [trackingError, setTrackingError] = useState('')
@@ -88,6 +89,7 @@ function PerformanceView() {
   const [instrumentVisualEvents, setInstrumentVisualEvents] = useState([])
   const [thereminVisual, setThereminVisual] = useState(null)
   const [fingerCurlDebugData, setFingerCurlDebugData] = useState([])
+  const [showFingerDebug, setShowFingerDebug] = useState(false)
 
   const handleTrackingError = useCallback((message) => {
     setTrackingError(message)
@@ -159,23 +161,28 @@ function PerformanceView() {
       const leftHand = getLeftHand(landmarks, handedness)
       if (rightHand) {
         const frequency = mapThereminFrequency(rightHand)
+        const volumeDb = leftHand ? mapLeftHandDistanceToVolume(leftHand) : -12
+        const volume = Math.max(0, Math.min(1, (volumeDb + 28) / 24))
         thereminYSamplesRef.current = [...thereminYSamplesRef.current, { y: rightHand[0].y }].slice(-8)
         updateTheremin({
           cutoff: mapThereminFilterCutoff(rightHand),
           frequency,
           pan: mapThereminPan(rightHand),
           vibratoAmount: getMicroVibratoAmount(thereminYSamplesRef.current),
-          volume: leftHand ? mapLeftHandDistanceToVolume(leftHand) : -12,
+          volume: volumeDb,
         })
         setThereminPitch((currentPitch) => (
           Math.abs((currentPitch ?? 0) - frequency) < 1 ? currentPitch : frequency
         ))
         const pitch = 1 - rightHand[0].y
-        const handDistance = leftHand ? Math.hypot(rightHand[0].x - leftHand[0].x, rightHand[0].y - leftHand[0].y) : 0.65
-        const intensity = 0.2 + Math.min(1, (1 - handDistance / 0.9 + pitch) / 2) * 0.8
+        const intensity = 0.14 + volume * 0.86
+        const flowSpeed = 0.58 + pitch * 0.62 + volume * 0.32
         setThereminVisual((currentVisual) => (
-          !currentVisual || Math.abs(currentVisual.intensity - intensity) > 0.025 || Math.abs(currentVisual.pitch - pitch) > 0.025
-            ? { intensity, pitch }
+          !currentVisual
+          || Math.abs(currentVisual.intensity - intensity) > 0.02
+          || Math.abs(currentVisual.pitch - pitch) > 0.012
+          || Math.abs(currentVisual.flowSpeed - flowSpeed) > 0.04
+            ? { flowSpeed, intensity, pitch, volume }
             : currentVisual
         ))
       } else {
@@ -241,7 +248,7 @@ function PerformanceView() {
       calibrationBaselinesRef.current,
       fingerCurlStatesRef.current,
     )
-    if (IS_DEVELOPMENT) {
+    if (IS_FINGER_DEBUG_ENABLED && showFingerDebugRef.current) {
       setFingerCurlDebugData(getFingerCurlDebugData(
         landmarks,
         handRoles,
@@ -255,16 +262,18 @@ function PerformanceView() {
     const nextFingerIds = new Set(triggeredItems.map(({ id }) => id))
     let didTriggerNote = false
     const newVisualEvents = []
+    const newlyTriggeredItems = triggeredItems.filter(({ id }) => !activeFingerIdsRef.current.has(id))
+    const simultaneousNoteCount = newlyTriggeredItems.reduce((count, item) => count + (item.notes?.length ?? 1), 0)
     triggeredItems.forEach((item) => {
       if (!activeFingerIdsRef.current.has(item.id)) {
         didTriggerNote = true
         if (item.notes) {
-          item.notes.forEach((note) => {
-            particleCanvasRef.current?.spawnBurst({ handColor: item.handColor, note, position: item.position })
+          item.notes.forEach((note, noteIndex) => {
+            particleCanvasRef.current?.spawnBurst({ chordSize: simultaneousNoteCount, handColor: item.handColor, includeFlash: noteIndex === 0, note, position: item.position })
             newVisualEvents.push({ color: item.handColor, id: `${item.id}-${note}-${performance.now()}`, note, position: item.position })
           })
         } else {
-          particleCanvasRef.current?.spawnBurst(item)
+          particleCanvasRef.current?.spawnBurst({ ...item, chordSize: simultaneousNoteCount })
           newVisualEvents.push({ color: item.handColor, id: `${item.id}-${performance.now()}`, note: item.note, position: item.position })
         }
       }
@@ -393,6 +402,13 @@ function PerformanceView() {
   function retryHandTracking() {
     setTrackingError('')
     setTrackingRetryKey((key) => key + 1)
+  }
+
+  function toggleFingerDebug() {
+    const nextVisibility = !showFingerDebugRef.current
+    showFingerDebugRef.current = nextVisibility
+    setShowFingerDebug(nextVisibility)
+    if (!nextVisibility) setFingerCurlDebugData([])
   }
 
   async function toggleRecording() {
@@ -547,6 +563,7 @@ function PerformanceView() {
               activeNotes={activeNotes}
               handCanvasRef={handTrackerRef}
               handOctaves={handOctaveIndicators}
+              isRecording={isRecording}
               isVideoHidden={isVideoHidden}
               mode={controlMode}
               particleCanvasRef={particleCanvasRef}
@@ -554,20 +571,26 @@ function PerformanceView() {
               triggerEvents={instrumentVisualEvents}
               videoRef={videoRef}
             />
-            <InstrumentBadge instrumentName={activeInstrument} pulseId={instrumentPulseId} />
+            <InstrumentBadge
+              instrumentName={controlMode === 'theremin' ? 'Theremin+' : controlMode === 'pinch' ? 'Pinch melody' : activeInstrument}
+              label={controlMode === 'piano' ? 'Instrument' : 'Mode'}
+              pulseId={instrumentPulseId}
+            />
             {isSustainActive && <p className="ae-sustain-indicator">Sustain active</p>}
             <div className="ae-octave-indicators" aria-label="Hand octave shifts">
               {handOctaveIndicators.map(({ color, id, shift }, index) => (
                 <span key={id} style={{ borderColor: color, color }}>H{index + 1} {shift > 0 ? `+${shift}` : shift}</span>
               ))}
             </div>
-            <p className="ae-active-notes">
-              Active notes <strong>{activeNoteDetails.length
-                ? activeNoteDetails.map(({ color, id, note }) => (
-                  <span key={id} className="ae-active-notes__note" style={{ color }}>{note}</span>
-                ))
-                : activeNotes.length ? activeNotes.join(' · ') : '—'}</strong>
-            </p>
+            {controlMode !== 'theremin' && (
+              <p className="ae-active-notes">
+                {controlMode === 'pinch' ? 'Pinch note' : 'Active notes'} <strong>{activeNoteDetails.length
+                  ? activeNoteDetails.map(({ color, id, note }) => (
+                    <span key={id} className="ae-active-notes__note" style={{ color }}>{note}</span>
+                  ))
+                  : activeNotes.length ? activeNotes.join(' · ') : '—'}</strong>
+              </p>
+            )}
             {controlMode === 'theremin' && thereminPitch && (
               <p className="ae-theremin-readout">Theremin+ <strong>{Math.round(thereminPitch)} Hz</strong></p>
             )}
@@ -669,21 +692,30 @@ function PerformanceView() {
         />
       </section>
 
-      {cameraState === 'active' && !showOnboarding && (
-        <p className="ae-status">
-          <span aria-hidden="true">●</span>{' '}
-          {controlMode === 'piano'
-            ? playMode === 'chords'
-              ? 'Chord shapes: thumb + middle + pinky for C major; index + ring for A minor.'
-              : 'Curl a finger toward your palm to play; use both hands for chords.'
-            : controlMode === 'theremin'
-              ? 'Theremin+: right hand controls pitch, pan, tone, and vibrato; left hand controls volume.'
-              : 'Move your right hand up or down to choose a C-major scale note, then pinch to play it.'}
-        </p>
+      {(cameraState === 'active' && !showOnboarding || audioError) && (
+        <div className="ae-performance__status">
+          {cameraState === 'active' && !showOnboarding && (
+            <p className="ae-status">
+              <span aria-hidden="true">●</span>{' '}
+              {controlMode === 'piano'
+                ? playMode === 'chords'
+                  ? 'Chord shapes: thumb + middle + pinky for C major; index + ring for A minor.'
+                  : 'Curl a finger toward your palm to play; use both hands for chords.'
+                : controlMode === 'theremin'
+                  ? 'Theremin+: right hand controls pitch, pan, tone, and vibrato; left hand controls volume.'
+                  : 'Move your right hand up or down to choose a C-major scale note, then pinch to play it.'}
+            </p>
+          )}
+          {audioError && <p className="ae-audio-error">{audioError}</p>}
+        </div>
       )}
-      {audioError && <p className="ae-audio-error">{audioError}</p>}
-      {IS_DEVELOPMENT && cameraState === 'active' && !showOnboarding && (
-        <FingerCurlDebugPanel hands={fingerCurlDebugData} />
+      {IS_FINGER_DEBUG_ENABLED && cameraState === 'active' && !showOnboarding && (
+        <>
+          <button className="ae-debug-toggle" type="button" onClick={toggleFingerDebug} aria-pressed={showFingerDebug}>
+            {showFingerDebug ? 'Hide curl debug' : 'Show curl debug'}
+          </button>
+          {showFingerDebug && <FingerCurlDebugPanel hands={fingerCurlDebugData} />}
+        </>
       )}
     </main>
   )

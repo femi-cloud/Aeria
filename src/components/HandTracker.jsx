@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 're
 import { createHandLandmarker, HandLandmarker } from '../lib/handTracking.js'
 
 const HAND_COLORS = ['#a791ff', '#5be6b3']
-const LOG_INTERVAL_MS = 1000
+const LOG_INTERVAL_MS = 3000
 const DUPLICATE_WRIST_DISTANCE_RATIO = 0.7
 const MIN_HANDEDNESS_CONFIDENCE = 0.75
 const MIN_PALM_SIZE = 0.025
@@ -107,6 +107,8 @@ const HandTracker = forwardRef(function HandTracker({ videoRef, onError, onResul
     }
 
     function logLandmarks(landmarks) {
+      if (!import.meta.env.DEV) return
+
       const now = performance.now()
       if (landmarks.length && now - lastLogTimeRef.current >= LOG_INTERVAL_MS) {
         lastLogTimeRef.current = now

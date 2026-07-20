@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
 
-const MAX_PARTICLES = 120
-const PARTICLES_PER_BURST = 8
+const MAX_PARTICLES = 150
+const PARTICLES_PER_BURST = 16
 const MIN_LIFESPAN_MS = 1000
 const MAX_LIFESPAN_MS = 1500
 const LOW_PITCH_COLOR = [72, 59, 196]
@@ -11,15 +11,23 @@ const NOTE_SEMITONES = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }
 const ParticleCanvas = forwardRef(function ParticleCanvas({ videoRef }, ref) {
   const canvasRef = useRef(null)
   const particlesRef = useRef([])
+  const flashesRef = useRef([])
+  const requestRenderRef = useRef(() => {})
 
   useImperativeHandle(ref, () => ({
     getCanvas: () => canvasRef.current,
-    spawnBurst({ handColor, note, position }) {
+    spawnBurst({ chordSize = 1, handColor, includeFlash = true, note, position }) {
       if (!position) return
 
       const color = getPitchColor(note)
-      const newParticles = Array.from({ length: PARTICLES_PER_BURST }, () => createParticle(position, color, handColor))
+      const burstStrength = 1 + Math.min(Math.max(chordSize - 1, 0) * 0.24, 0.72)
+      const particleCount = Math.round(PARTICLES_PER_BURST * burstStrength)
+      const newParticles = Array.from({ length: particleCount }, () => createParticle(position, color, handColor, burstStrength))
       particlesRef.current = [...particlesRef.current, ...newParticles].slice(-MAX_PARTICLES)
+      if (includeFlash) {
+        flashesRef.current = [...flashesRef.current, createFlash(position, color, burstStrength)].slice(-10)
+      }
+      requestRenderRef.current()
     },
   }), [])
 
@@ -27,7 +35,12 @@ const ParticleCanvas = forwardRef(function ParticleCanvas({ videoRef }, ref) {
     let animationFrameId
     let previousTime = performance.now()
 
+    function requestRender() {
+      if (animationFrameId === undefined) animationFrameId = requestAnimationFrame(render)
+    }
+
     function render(now) {
+      animationFrameId = undefined
       const canvas = canvasRef.current
       const video = videoRef.current
       if (canvas && video?.videoWidth && video?.videoHeight) {
@@ -38,20 +51,23 @@ const ParticleCanvas = forwardRef(function ParticleCanvas({ videoRef }, ref) {
 
         const deltaSeconds = Math.min((now - previousTime) / 1000, 0.05)
         previousTime = now
-        drawParticles(canvas, particlesRef, deltaSeconds, now)
+        drawParticles(canvas, particlesRef, flashesRef, deltaSeconds, now)
       }
 
-      animationFrameId = requestAnimationFrame(render)
+      if (particlesRef.current.length || flashesRef.current.length) requestRender()
     }
 
-    animationFrameId = requestAnimationFrame(render)
-    return () => cancelAnimationFrame(animationFrameId)
+    requestRenderRef.current = requestRender
+    return () => {
+      requestRenderRef.current = () => {}
+      if (animationFrameId !== undefined) cancelAnimationFrame(animationFrameId)
+    }
   }, [videoRef])
 
   return <canvas ref={canvasRef} className="ae-particle-canvas" aria-hidden="true" />
 })
 
-function createParticle(position, color, handColor) {
+function createParticle(position, color, handColor, burstStrength) {
   const lifespan = MIN_LIFESPAN_MS + Math.random() * (MAX_LIFESPAN_MS - MIN_LIFESPAN_MS)
   const angle = Math.random() * Math.PI * 2
   const speed = 0.025 + Math.random() * 0.06
@@ -61,19 +77,46 @@ function createParticle(position, color, handColor) {
     handColor,
     createdAt: performance.now(),
     lifespan,
-    size: 3 + Math.random() * 4,
+    size: 2.25 + Math.random() * 6.5 + (burstStrength - 1) * 2.5,
     x: position.x,
     y: position.y,
-    velocityX: Math.cos(angle) * speed,
-    velocityY: Math.sin(angle) * speed - 0.08,
+    velocityX: Math.cos(angle) * speed * burstStrength,
+    velocityY: Math.sin(angle) * speed * burstStrength - 0.08,
   }
 }
 
-function drawParticles(canvas, particlesRef, deltaSeconds, now) {
+function createFlash(position, color, strength) {
+  return {
+    color,
+    createdAt: performance.now(),
+    lifespan: 280 + (strength - 1) * 140,
+    position,
+    radius: 18 + strength * 18,
+  }
+}
+
+function drawParticles(canvas, particlesRef, flashesRef, deltaSeconds, now) {
   const context = canvas.getContext('2d')
   context.clearRect(0, 0, canvas.width, canvas.height)
 
   particlesRef.current = particlesRef.current.filter((particle) => now - particle.createdAt < particle.lifespan)
+  flashesRef.current = flashesRef.current.filter((flash) => now - flash.createdAt < flash.lifespan)
+
+  flashesRef.current.forEach((flash) => {
+    const progress = (now - flash.createdAt) / flash.lifespan
+    const alpha = (1 - progress) ** 2
+    const radius = flash.radius * (0.7 + progress * 1.9)
+    const x = flash.position.x * canvas.width
+    const y = flash.position.y * canvas.height
+    const glow = context.createRadialGradient(x, y, 0, x, y, radius)
+    glow.addColorStop(0, `rgba(${flash.color.join(', ')}, ${alpha * .8})`)
+    glow.addColorStop(.35, `rgba(${flash.color.join(', ')}, ${alpha * .28})`)
+    glow.addColorStop(1, `rgba(${flash.color.join(', ')}, 0)`)
+    context.fillStyle = glow
+    context.beginPath()
+    context.arc(x, y, radius, 0, Math.PI * 2)
+    context.fill()
+  })
 
   particlesRef.current.forEach((particle) => {
     // Positions are normalized to the video, so the trail stays aligned if the canvas resizes.
