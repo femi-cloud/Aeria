@@ -56,8 +56,10 @@ export function getCurledFingerNotes(allLandmarks, allHandedness, handRoles = []
 
 export function getCurledFingerChords(allLandmarks, allHandedness, handRoles = [], handOctaveShifts = [], stableFingersByHand = []) {
   return allLandmarks.flatMap((landmarks, handIndex) => {
-    const handSide = getHandSide(allHandedness[handIndex], handIndex)
     const handRole = handRoles[handIndex]
+    // Hand roles are normalized once at the tracker boundary. Reuse that
+    // identity here rather than independently deriving a side for chords.
+    const handSide = handRole?.id ?? getHandSide(allHandedness[handIndex], handIndex)
     const curledFingers = stableFingersByHand[handIndex] ?? getCurledFingers(landmarks)
     const curledFingerNames = curledFingers.map(({ name }) => name)
     const chord = CHORD_SHAPES.find(({ fingers }) => hasExactFingerShape(curledFingerNames, fingers))

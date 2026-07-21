@@ -1,80 +1,46 @@
-import { HAND_CONNECTIONS, Hands, VERSION } from '@mediapipe/hands'
+import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision'
 
-const HANDS_CDN_ROOT = `https://cdn.jsdelivr.net/npm/@mediapipe/hands@${VERSION}`
-const LITE_MODEL_COMPLEXITY = 0
+const WASM_ROOT = '/mediapipe-tasks-vision'
+const HAND_LANDMARKER_MODEL = '/models/hand_landmarker.task'
 let creationCount = 0
 
-export async function createLiteHandTracker(onResults) {
+export async function createHandLandmarker() {
   const instanceId = ++creationCount
-  const gpuDiagnostics = getGpuDiagnostics()
-  const runtimeDelegate = gpuDiagnostics.webglAvailable
-    ? 'GPU/WebGL available (MediaPipe Hands does not expose a delegate getter)'
-    : 'CPU/WASM fallback likely (WebGL unavailable)'
-
-  if (import.meta.env.DEV) {
-    console.info('[Aeria] Creating Lite Hands tracker', {
-      delegateReportedByMediaPipe: 'not exposed by the public Hands API',
-      instanceId,
-      modelComplexity: LITE_MODEL_COMPLEXITY,
-      runtimeDelegate,
-      ...gpuDiagnostics,
-    })
-  }
-
-  const hands = new Hands({ locateFile: (file) => `${HANDS_CDN_ROOT}/${file}` })
-  hands.setOptions({
-    maxNumHands: 2,
-    minDetectionConfidence: 0.75,
+  const vision = await FilesetResolver.forVisionTasks(WASM_ROOT)
+  const handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      delegate: 'GPU',
+      modelAssetPath: HAND_LANDMARKER_MODEL,
+    },
+    runningMode: 'VIDEO',
+    numHands: 2,
+    minHandDetectionConfidence: 0.75,
+    minHandPresenceConfidence: 0.75,
     minTrackingConfidence: 0.7,
-    modelComplexity: LITE_MODEL_COMPLEXITY,
-    // The video is mirrored in CSS. Keep the model input raw, then flip its
-    // raw labels once below so every consumer uses screen-consistent identity.
-    selfieMode: false,
   })
-  hands.onResults((results) => {
-    onResults({
-      handedness: (results.multiHandedness ?? []).map(({ label, score }) => {
-        const rawCategoryName = label.toLowerCase()
-        return [{
-          categoryName: flipHandedness(rawCategoryName),
-          rawCategoryName,
-          score,
-        }]
-      }),
-      landmarks: results.multiHandLandmarks ?? [],
-    })
-  })
-  await hands.initialize()
 
   if (import.meta.env.DEV) {
-    console.info('[Aeria] Lite Hands tracker ready', {
-      delegateReportedByMediaPipe: 'not exposed by the public Hands API',
-      instanceId,
-      model: 'hand_landmark_lite.tflite',
-      modelComplexity: LITE_MODEL_COMPLEXITY,
-      runtimeDelegate,
-    })
+    console.info('[Aeria] Tasks HandLandmarker ready', { delegate: 'GPU', instanceId })
   }
 
-  return { hands, instanceId, runtimeDelegate }
+  return { handLandmarker, instanceId }
 }
 
-function flipHandedness(label) {
-  if (label === 'left') return 'Right'
-  if (label === 'right') return 'Left'
-  return label
+export function mapMirroredHandedness(handedness = []) {
+  return handedness.map((hand) => {
+    const rawCategoryName = hand?.[0]?.categoryName?.toLowerCase()
+    // The video is mirrored with CSS for a natural selfie view, while
+    // MediaPipe receives the unmirrored camera pixels. Its raw label must be
+    // inverted exactly once before the rest of Aeria assigns a hand role.
+    const categoryName = getMirroredAppHandedness(rawCategoryName)
+    return [{ ...hand?.[0], categoryName, displayName: categoryName, rawCategoryName }]
+  })
 }
 
-function getGpuDiagnostics() {
-  const canvas = document.createElement('canvas')
-  const context = canvas.getContext('webgl2', { failIfMajorPerformanceCaveat: true })
-    ?? canvas.getContext('webgl', { failIfMajorPerformanceCaveat: true })
-  const debugInfo = context?.getExtension('WEBGL_debug_renderer_info')
-
-  return {
-    gpuRenderer: debugInfo ? context.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : 'unavailable',
-    webglAvailable: Boolean(context),
-  }
+export function getMirroredAppHandedness(rawCategoryName) {
+  if (rawCategoryName === 'left') return 'Right'
+  if (rawCategoryName === 'right') return 'Left'
+  return rawCategoryName
 }
 
-export { HAND_CONNECTIONS }
+export { HandLandmarker }
