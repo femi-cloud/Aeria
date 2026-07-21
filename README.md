@@ -2,6 +2,8 @@
 
 Aeria is a browser-based, gesture-controlled music instrument. Enable your webcam, play notes with hand movements, switch instruments with gestures, and record an audiovisual performance—no physical instrument, backend, account, or API key required.
 
+![Aeria screenshot](./screenshot.png)
+
 Built for OpenAI Build Week, Aeria runs entirely in the browser. Camera frames, MediaPipe hand tracking, Tone.js audio, visuals, and recordings remain local to the device.
 
 ## Features
