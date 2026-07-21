@@ -1,4 +1,37 @@
 node_modules/
 dist/
 .pnpm-store/
-.env.local
+
+# Local environment configuration
+.env
+.env.*
+!.env.example
+
+# Package manager, Vite, and test output
+.vite/
+coverage/
+*.tsbuildinfo
+
+# Logs and crash reports
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local recordings and temporary exports
+recordings/
+aeria-recording-*.webm
+
+# Superseded MediaPipe Hands runtime (Tasks Vision is used instead)
+public/mediapipe-hands/
+
+# Local editor and agent configuration
+.vscode/
+.idea/
+.agents/
+.codex/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
