@@ -20,12 +20,15 @@ const CURL_THRESHOLD_RATIO = 0.95
 const PINCH_THRESHOLD = 0.06
 const FIST_THRESHOLD_RATIO = 1.1
 const EXTENDED_FINGER_RATIO = 1.2
-// Each finger is measured against its own open-hand baseline. The thumb uses
-// palm-center distance; all other fingers use tip-to-MCP distance. In both
-// cases, a larger value means more extended and a smaller value means curled.
-const NOTE_ON_RATIO = 0.6
-const NOTE_OFF_RATIO = 0.75
-const NOTE_ON_HOLD_MS = 90
+// Each finger gets a resting height relative to the wrist and an open-hand
+// length. Piano taps are measured as a fast, downward change from that rest.
+const TAP_DOWN_RATIO = 0.18
+const TAP_UP_RATIO = 0.09
+const THUMB_TAP_DOWN_RATIO = 0.14
+const THUMB_TAP_UP_RATIO = 0.07
+const TAP_START_RATIO = 0.35
+const TAP_WINDOW_MS = 220
+const MAX_NOTE_HOLD_MS = 3000
 
 export function getCurledFingerNotes(allLandmarks, allHandedness, handRoles = [], handOctaveShifts = [], stableFingersByHand = []) {
   return allLandmarks.flatMap((landmarks, handIndex) => {
@@ -126,14 +129,32 @@ export function getMicroVibratoAmount(samples) {
     : 0
 }
 
-export function collectOpenHandFingerDistances(landmarks) {
-  return Object.fromEntries(FINGERS.map((finger) => [
-    finger.name,
-    getFingerCurlDistance(landmarks, finger),
-  ]))
+export function collectOpenHandFingerBaselines(landmarks) {
+  return Object.fromEntries(FINGERS.map((finger) => {
+    const fingertip = landmarks[finger.tip]
+    const wrist = landmarks[0]
+    const knuckle = landmarks[finger.knuckle]
+
+    return [finger.name, {
+      fingerLength: getLandmarkDistance(fingertip, knuckle),
+      restY: (fingertip?.y ?? 0) - (wrist?.y ?? 0),
+      thumbArcDistance: finger.name === 'thumb'
+        ? getLandmarkDistance(fingertip, landmarks[1])
+        : null,
+    }]
+  }))
 }
 
-export function getStableCurledFingersByHand(allLandmarks, handRoles, calibrationBaselines, fingerStates, now = performance.now()) {
+export function ensureFingerTapBaselines(allLandmarks, handRoles, baselines) {
+  allLandmarks.forEach((landmarks, handIndex) => {
+    const handId = handRoles[handIndex]?.id ?? `hand-${handIndex}`
+    if (!hasFingerBaselines(baselines.get(handId))) {
+      baselines.set(handId, collectOpenHandFingerBaselines(landmarks))
+    }
+  })
+}
+
+export function getStableTappedFingersByHand(allLandmarks, handRoles, calibrationBaselines, fingerStates, now = performance.now()) {
   return allLandmarks.map((landmarks, handIndex) => {
     const handId = handRoles[handIndex]?.id ?? `hand-${handIndex}`
     const baseline = calibrationBaselines.get(handId)
@@ -141,29 +162,60 @@ export function getStableCurledFingersByHand(allLandmarks, handRoles, calibratio
 
     return FINGERS.filter((finger) => {
       const key = `${handId}-${finger.name}`
-      const distance = getFingerCurlDistance(landmarks, finger)
-      const openDistance = baseline[finger.name]
-      const state = fingerStates.get(key) ?? { isCurled: false, startedAt: null }
+      const fingerBaseline = baseline[finger.name]
+      const downwardMotion = getFingerTapMotion(landmarks, finger, fingerBaseline)
+      const { downThreshold, upThreshold } = getFingerTapThresholds(finger, fingerBaseline)
+      const state = fingerStates.get(key) ?? {
+        activeAt: null,
+        isPressed: false,
+        requiresRelease: false,
+        tapStartedAt: null,
+      }
 
-      if (state.isCurled) {
-        if (distance >= openDistance * NOTE_OFF_RATIO) {
-          state.isCurled = false
-          state.startedAt = null
+      if (state.requiresRelease) {
+        if (downwardMotion <= upThreshold) state.requiresRelease = false
+        state.activeAt = null
+        state.isPressed = false
+        state.tapStartedAt = null
+      } else if (state.isPressed) {
+        if (!state.activeAt) state.activeAt = now
+        if (state.activeAt && now - state.activeAt >= MAX_NOTE_HOLD_MS) {
+          // Never leave a live-performance note stuck; require an extension
+          // before the finger may trigger again.
+          state.activeAt = null
+          state.isPressed = false
+          state.requiresRelease = true
+        } else if (downwardMotion <= upThreshold) {
+          state.activeAt = null
+          state.isPressed = false
+          state.tapStartedAt = null
         }
-      } else if (distance <= openDistance * NOTE_ON_RATIO) {
-        if (state.startedAt === null) state.startedAt = now
-        if (now - state.startedAt >= NOTE_ON_HOLD_MS) state.isCurled = true
       } else {
-        state.startedAt = null
+        if (downwardMotion <= upThreshold) {
+          state.tapStartedAt = null
+        } else if (state.tapStartedAt === null && downwardMotion >= downThreshold * TAP_START_RATIO) {
+          state.tapStartedAt = now
+        }
+
+        if (downwardMotion >= downThreshold && state.tapStartedAt !== null && now - state.tapStartedAt <= TAP_WINDOW_MS) {
+          state.activeAt = now
+          state.isPressed = true
+          state.tapStartedAt = null
+        } else if (state.tapStartedAt !== null && now - state.tapStartedAt > TAP_WINDOW_MS) {
+          // A slow descent is not a piano tap. It must return to rest before
+          // it can begin another downstroke.
+          state.requiresRelease = true
+          state.tapStartedAt = null
+        }
       }
 
       fingerStates.set(key, state)
-      return state.isCurled
+      return state.isPressed
     })
   })
 }
 
-export function getFingerCurlDebugData(allLandmarks, handRoles, calibrationBaselines, fingerStates) {
+export function getFingerTapDebugData(allLandmarks, handRoles, calibrationBaselines, fingerStates) {
   return allLandmarks.map((landmarks, handIndex) => {
     const handId = handRoles[handIndex]?.id ?? `hand-${handIndex}`
     const handSide = handRoles[handIndex]?.id ?? (handIndex === 0 ? 'right' : 'left')
@@ -174,18 +226,22 @@ export function getFingerCurlDebugData(allLandmarks, handRoles, calibrationBasel
       color: handRoles[handIndex]?.color,
       id: handId,
       fingers: FINGERS.map((finger) => {
-        const openDistance = baseline?.[finger.name]
-        const distance = getFingerCurlDistance(landmarks, finger)
+        const fingerBaseline = baseline?.[finger.name]
+        const distance = fingerBaseline ? getFingerTapMotion(landmarks, finger, fingerBaseline) : null
         const state = fingerStates.get(`${handId}-${finger.name}`)
         const note = notes[getFingerNoteIndex(handSide, finger, notes.length)]
+        const { downThreshold, upThreshold } = fingerBaseline
+          ? getFingerTapThresholds(finger, fingerBaseline)
+          : {}
 
         return {
           distance,
+          motionAxis: finger.name === 'thumb' ? 'arc' : 'vertical',
           name: finger.name,
           note,
-          noteOffThreshold: Number.isFinite(openDistance) ? openDistance * NOTE_OFF_RATIO : null,
-          noteOnThreshold: Number.isFinite(openDistance) ? openDistance * NOTE_ON_RATIO : null,
-          triggered: Boolean(note && state?.isCurled),
+          noteOffThreshold: upThreshold ?? null,
+          noteOnThreshold: downThreshold ?? null,
+          triggered: Boolean(note && state?.isPressed),
         }
       }),
     }
@@ -319,8 +375,38 @@ function getFingerCurlDistance(landmarks, finger) {
   return getLandmarkDistance(fingertip, landmarks[finger.knuckle])
 }
 
+function getFingerRelativeY(landmarks, finger) {
+  return (landmarks[finger.tip]?.y ?? 0) - (landmarks[0]?.y ?? 0)
+}
+
+function getFingerTapMotion(landmarks, finger, baseline) {
+  if (finger.name === 'thumb') {
+    // Thumb presses travel diagonally across the palm, so measure how much the
+    // tip retracts toward its own CMC joint instead of its screen-space Y.
+    return baseline.thumbArcDistance - getLandmarkDistance(landmarks[finger.tip], landmarks[1])
+  }
+
+  return getFingerRelativeY(landmarks, finger) - baseline.restY
+}
+
+function getFingerTapThresholds(finger, baseline) {
+  const isThumb = finger.name === 'thumb'
+  const downRatio = isThumb ? THUMB_TAP_DOWN_RATIO : TAP_DOWN_RATIO
+  const upRatio = isThumb ? THUMB_TAP_UP_RATIO : TAP_UP_RATIO
+
+  return {
+    downThreshold: Math.max(isThumb ? 0.014 : 0.018, baseline.fingerLength * downRatio),
+    upThreshold: Math.max(isThumb ? 0.008 : 0.01, baseline.fingerLength * upRatio),
+  }
+}
+
 function hasFingerBaselines(baseline) {
-  return FINGERS.every((finger) => Number.isFinite(baseline?.[finger.name]) && baseline[finger.name] > 0)
+  return FINGERS.every((finger) => (
+    Number.isFinite(baseline?.[finger.name]?.fingerLength)
+    && baseline[finger.name].fingerLength > 0
+    && Number.isFinite(baseline[finger.name].restY)
+    && (finger.name !== 'thumb' || Number.isFinite(baseline[finger.name].thumbArcDistance))
+  ))
 }
 
 function getPalmCenter(landmarks) {

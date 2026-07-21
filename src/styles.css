@@ -102,6 +102,13 @@ h1 { font-family: 'Space Grotesk', sans-serif; font-size: 1.35rem; letter-spacin
 .ae-performance__status { align-items: center; display: grid; gap: .2rem; grid-row: 4; justify-items: center; }
 .ae-debug-panel { background: #0B0B14f2; border: 1px solid #7C6FFF88; border-radius: .55rem; bottom: .8rem; box-shadow: 0 .8rem 2rem #0008; color: #F2F0FA; font-family: 'IBM Plex Mono', monospace; font-size: .62rem; max-height: min(58dvh, 31rem); overflow: auto; padding: .55rem; position: fixed; right: .8rem; width: min(28rem, calc(100vw - 1.6rem)); z-index: 20; }
 .ae-debug-toggle { font-family: 'IBM Plex Mono', monospace; font-size: .65rem; position: fixed; right: .8rem; top: .8rem; z-index: 21; }
+.ae-performance-debug { background: #0B0B14ed; border: 1px solid #F5C77E80; border-radius: .55rem; box-shadow: 0 .8rem 2rem #0008; color: #F2F0FA; font-family: 'IBM Plex Mono', monospace; font-size: .66rem; line-height: 1.35; padding: .55rem .65rem; position: fixed; right: .8rem; top: 3.6rem; width: 13.5rem; z-index: 21; }
+.ae-performance-debug__title { color: #F5C77E; font-weight: 700; margin: 0 0 .35rem; }
+.ae-performance-debug dl { display: grid; gap: .18rem; margin: 0; }
+.ae-performance-debug dl div { display: flex; justify-content: space-between; gap: .7rem; }
+.ae-performance-debug dt { color: #8B87A8; }
+.ae-performance-debug dd { margin: 0; }
+.ae-performance-debug__note { color: #8B87A8; font-size: .57rem; line-height: 1.35; margin: .45rem 0 0; }
 .ae-debug-panel__title { color: #F5C77E; font-weight: 700; margin: 0; }
 .ae-debug-panel__legend { color: #8B87A8; margin: .18rem 0 .45rem; }
 .ae-debug-panel__hand { border-left: 2px solid var(--ae-debug-color); margin-top: .45rem; padding-left: .4rem; }

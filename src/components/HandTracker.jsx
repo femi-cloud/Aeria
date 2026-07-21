@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
-import { createHandLandmarker, HandLandmarker } from '../lib/handTracking.js'
+import { createLiteHandTracker, HAND_CONNECTIONS } from '../lib/handTracking.js'
 
 const HAND_COLORS = ['#a791ff', '#5be6b3']
 const LOG_INTERVAL_MS = 3000
@@ -10,10 +10,12 @@ const MAX_PALM_SIZE = 0.65
 const MAX_FINGER_REACH_RATIO = 4
 const MAX_WRIST_JUMP_PALM_MULTIPLIER = 4.5
 const WRIST_JUMP_GRACE_MS = 220
+const DETECTION_FRAME_STRIDE = 2
 
-const HandTracker = forwardRef(function HandTracker({ videoRef, onError, onResults, reloadKey }, ref) {
+const HandTracker = forwardRef(function HandTracker({ videoRef, onError, onMetrics, onResults, reloadKey }, ref) {
   const canvasRef = useRef(null)
   const lastLogTimeRef = useRef(0)
+  const lastHandednessLogRef = useRef(0)
   const hasHandsRef = useRef(false)
   const lastVideoTimeRef = useRef(-1)
   const previousValidHandsRef = useRef(new Map())
@@ -25,28 +27,38 @@ const HandTracker = forwardRef(function HandTracker({ videoRef, onError, onResul
   }), [])
 
   useEffect(() => {
-    let animationFrameId
+    let detectionAnimationFrameId
+    let renderAnimationFrameId
     let videoFrameCallbackId
-    let handLandmarker
+    let hands
+    let handsInstanceId
+    let didReportInput = false
+    let detectionFrameCount = 0
+    let inferenceStartedAt = 0
+    let isInferencePending = false
     let isDisposed = false
+    const latestResults = { handedness: [], landmarks: [] }
 
     async function startTracking() {
       setIsLoading(true)
       setHasHands(false)
       try {
-        handLandmarker = await createHandLandmarker()
+        const createdTracker = await createLiteHandTracker(handleResults)
+        hands = createdTracker.hands
+        handsInstanceId = createdTracker.instanceId
         if (isDisposed) {
-          handLandmarker.close()
+          hands.close()
           return
         }
 
         setIsLoading(false)
         scheduleNextDetection()
+        renderLatestSkeleton()
       } catch (error) {
         if (!isDisposed) {
           setIsLoading(false)
           onError('Hand tracking could not load. Check your internet connection, then refresh and try again.')
-          console.error('Aeria: failed to initialize MediaPipe Hand Landmarker.', error)
+          console.error('Aeria: failed to initialize MediaPipe Lite Hands.', error)
         }
       }
     }
@@ -55,39 +67,81 @@ const HandTracker = forwardRef(function HandTracker({ videoRef, onError, onResul
       if (isDisposed) return
 
       const video = videoRef.current
-      const canvas = canvasRef.current
       const hasNewVideoFrame = video?.currentTime !== lastVideoTimeRef.current
-      if (video && canvas && hasNewVideoFrame && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-        try {
-          lastVideoTimeRef.current = video.currentTime
-          const results = handLandmarker.detectForVideo(video, performance.now())
-          const { landmarks, handedness } = filterOverlappingHands(
-            results.landmarks ?? [],
-            results.handedness ?? [],
-          )
-          const isValidFrame = areHandsStableAndPlausible(
-            landmarks,
-            handedness,
-            previousValidHandsRef.current,
-            performance.now(),
-          )
+      if (video && hasNewVideoFrame && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        lastVideoTimeRef.current = video.currentTime
+        const frameAt = performance.now()
+        onMetrics?.({ frameAt })
+        detectionFrameCount += 1
 
-          if (!isValidFrame) {
-            drawHandSkeleton(canvas, video, [], [])
-          } else {
-            drawHandSkeleton(canvas, video, landmarks, handedness)
-            updateHandHint(landmarks.length > 0)
-            logLandmarks(landmarks)
-            onResults({ landmarks, handedness })
-          }
-        } catch (error) {
-          onError('Hand tracking stopped unexpectedly. Refresh the page to try again.')
-          console.error('Aeria: MediaPipe hand detection failed.', error)
-          return
+        if (detectionFrameCount % DETECTION_FRAME_STRIDE === 0 && !isInferencePending) {
+          sendFrameForDetection(video, frameAt)
         }
       }
 
       scheduleNextDetection()
+    }
+
+    async function sendFrameForDetection(video, frameAt) {
+      try {
+        if (!didReportInput) {
+          const settings = video.srcObject?.getVideoTracks?.()[0]?.getSettings?.()
+          const inputResolution = `${video.videoWidth}×${video.videoHeight}`
+          if (import.meta.env.DEV) {
+            console.info('[Aeria] Lite Hands input', { inputResolution, instanceId: handsInstanceId, trackSettings: settings })
+          }
+          onMetrics?.({ inputResolution })
+          didReportInput = true
+        }
+
+        inferenceStartedAt = frameAt
+        isInferencePending = true
+        await hands.send({ image: video })
+      } catch (error) {
+        if (!isDisposed) {
+          onError('Hand tracking stopped unexpectedly. Refresh the page to try again.')
+          console.error('Aeria: MediaPipe Lite Hands detection failed.', error)
+        }
+      } finally {
+        isInferencePending = false
+      }
+    }
+
+    function handleResults(results) {
+      if (isDisposed) return
+
+      const { landmarks, handedness } = filterOverlappingHands(results.landmarks, results.handedness)
+      const isValidFrame = areHandsStableAndPlausible(
+        landmarks,
+        handedness,
+        previousValidHandsRef.current,
+        performance.now(),
+      )
+      if (!isValidFrame) return
+
+      latestResults.landmarks = landmarks
+      latestResults.handedness = handedness
+      updateHandHint(landmarks.length > 0)
+      logHandedness(handedness)
+      logLandmarks(landmarks)
+      const gestureStartedAt = performance.now()
+      onResults({ landmarks, handedness })
+      onMetrics?.({
+        detectionMs: performance.now() - inferenceStartedAt,
+        gestureMs: performance.now() - gestureStartedAt,
+      })
+    }
+
+    function renderLatestSkeleton() {
+      if (isDisposed) return
+      const canvas = canvasRef.current
+      const video = videoRef.current
+      if (canvas && video?.videoWidth && video?.videoHeight) {
+        const drawStartedAt = performance.now()
+        drawHandSkeleton(canvas, video, latestResults.landmarks, latestResults.handedness)
+        onMetrics?.({ skeletonMs: performance.now() - drawStartedAt })
+      }
+      renderAnimationFrameId = requestAnimationFrame(renderLatestSkeleton)
     }
 
     function scheduleNextDetection() {
@@ -95,7 +149,7 @@ const HandTracker = forwardRef(function HandTracker({ videoRef, onError, onResul
       if (video?.requestVideoFrameCallback) {
         videoFrameCallbackId = video.requestVideoFrameCallback(detectHands)
       } else {
-        animationFrameId = requestAnimationFrame(detectHands)
+        detectionAnimationFrameId = requestAnimationFrame(detectHands)
       }
     }
 
@@ -116,15 +170,29 @@ const HandTracker = forwardRef(function HandTracker({ videoRef, onError, onResul
       }
     }
 
+    function logHandedness(handedness) {
+      if (!import.meta.env.DEV) return
+
+      const now = performance.now()
+      if (handedness.length && now - lastHandednessLogRef.current >= LOG_INTERVAL_MS) {
+        lastHandednessLogRef.current = now
+        console.info('[Aeria] Hand identity (raw → mirrored app mapping):', handedness.map((hand) => ({
+          app: hand?.[0]?.categoryName,
+          raw: hand?.[0]?.rawCategoryName,
+        })))
+      }
+    }
+
     startTracking()
 
     return () => {
       isDisposed = true
-      cancelAnimationFrame(animationFrameId)
+      cancelAnimationFrame(detectionAnimationFrameId)
+      cancelAnimationFrame(renderAnimationFrameId)
       videoRef.current?.cancelVideoFrameCallback?.(videoFrameCallbackId)
-      handLandmarker?.close()
+      hands?.close()
     }
-  }, [onError, onResults, reloadKey, videoRef])
+  }, [onError, onMetrics, onResults, reloadKey, videoRef])
 
   return (
     <>
@@ -154,7 +222,7 @@ function drawHandSkeleton(canvas, video, hands, handedness) {
     context.fillStyle = color
     context.lineWidth = Math.max(3, width * 0.003)
 
-    HandLandmarker.HAND_CONNECTIONS.forEach(({ start, end }) => {
+    HAND_CONNECTIONS.forEach(([start, end]) => {
       const from = hand[start]
       const to = hand[end]
       context.beginPath()

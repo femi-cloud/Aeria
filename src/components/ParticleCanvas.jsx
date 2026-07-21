@@ -8,7 +8,7 @@ const LOW_PITCH_COLOR = [72, 59, 196]
 const HIGH_PITCH_COLOR = [255, 199, 73]
 const NOTE_SEMITONES = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }
 
-const ParticleCanvas = forwardRef(function ParticleCanvas({ videoRef }, ref) {
+const ParticleCanvas = forwardRef(function ParticleCanvas({ onMetrics, videoRef }, ref) {
   const canvasRef = useRef(null)
   const particlesRef = useRef([])
   const flashesRef = useRef([])
@@ -51,7 +51,12 @@ const ParticleCanvas = forwardRef(function ParticleCanvas({ videoRef }, ref) {
 
         const deltaSeconds = Math.min((now - previousTime) / 1000, 0.05)
         previousTime = now
+        const drawStartedAt = performance.now()
         drawParticles(canvas, particlesRef, flashesRef, deltaSeconds, now)
+        onMetrics?.({
+          activeParticles: particlesRef.current.length,
+          particleMs: performance.now() - drawStartedAt,
+        })
       }
 
       if (particlesRef.current.length || flashesRef.current.length) requestRender()
@@ -62,7 +67,7 @@ const ParticleCanvas = forwardRef(function ParticleCanvas({ videoRef }, ref) {
       requestRenderRef.current = () => {}
       if (animationFrameId !== undefined) cancelAnimationFrame(animationFrameId)
     }
-  }, [videoRef])
+  }, [onMetrics, videoRef])
 
   return <canvas ref={canvasRef} className="ae-particle-canvas" aria-hidden="true" />
 })

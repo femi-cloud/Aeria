@@ -2,14 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import HandTracker from '../components/HandTracker.jsx'
 import InstrumentBadge from '../components/InstrumentBadge.jsx'
 import InstrumentVisuals from '../components/InstrumentVisuals.jsx'
-import CalibrationOverlay from '../components/CalibrationOverlay.jsx'
 import FingerCurlDebugPanel from '../components/FingerCurlDebugPanel.jsx'
 import OnboardingOverlay from '../components/OnboardingOverlay.jsx'
 import ParticleCanvas from '../components/ParticleCanvas.jsx'
+import PerformanceDebugOverlay from '../components/PerformanceDebugOverlay.jsx'
 import RecordingControls from '../components/RecordingControls.jsx'
 import RecordingCanvas from '../components/RecordingCanvas.jsx'
 import WaveformBar from '../components/WaveformBar.jsx'
-import { areBothHandsClosedFists, collectOpenHandFingerDistances, getCurledFingerChords, getCurledFingerNotes, getFingerCurlDebugData, getLeftHand, getMicroVibratoAmount, getOctaveShiftForWrist, getOpenPalms, getPeaceSigns, getRightHand, getStableCurledFingersByHand, isPinching, mapLeftHandDistanceToVolume, mapRightHandToNote, mapThereminFilterCutoff, mapThereminFrequency, mapThereminPan } from '../lib/gestureMapping.js'
+import { areBothHandsClosedFists, ensureFingerTapBaselines, getCurledFingerChords, getCurledFingerNotes, getFingerTapDebugData, getLeftHand, getMicroVibratoAmount, getOctaveShiftForWrist, getOpenPalms, getPeaceSigns, getRightHand, getStableTappedFingersByHand, isPinching, mapLeftHandDistanceToVolume, mapRightHandToNote, mapThereminFilterCutoff, mapThereminFrequency, mapThereminPan } from '../lib/gestureMapping.js'
 import { activateSustain, createRecordingAudioStream, cycleInstrument, disposeMusicEngine, disposeRecordingAudioStream, playMajorArpeggio, startMusicEngine, stopPlayedNotes, updateChordNotes, updateFingerNotes, updatePinchNote, updateTheremin } from '../lib/musicEngine.js'
 import { createRhythmDetector } from '../lib/rhythmDetection.js'
 
@@ -17,8 +17,8 @@ const cameraConstraints = {
   audio: false,
   video: {
     facingMode: 'user',
-    width: { ideal: 640, max: 640 },
-    height: { ideal: 480, max: 480 },
+    width: { ideal: 480, max: 480 },
+    height: { ideal: 360, max: 360 },
   },
 }
 
@@ -28,6 +28,7 @@ const OPEN_PALM_HOLD_DURATION_MS = 500
 const PEACE_SIGN_HOLD_DURATION_MS = 350
 const C_MAJOR_SCALE = ['C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4', 'C5']
 const IS_FINGER_DEBUG_ENABLED = import.meta.env.DEV && import.meta.env.VITE_AERIA_DEBUG === 'true'
+const IS_PERFORMANCE_DEBUG_ENABLED = import.meta.env.DEV
 
 function PerformanceView() {
   const videoRef = useRef(null)
@@ -56,13 +57,9 @@ function PerformanceView() {
   const handOctaveShiftsRef = useRef(new Map())
   const thereminYSamplesRef = useRef([])
   const calibrationBaselinesRef = useRef(new Map())
-  const calibrationSamplesRef = useRef(new Map())
-  const calibrationStartedAtRef = useRef(null)
-  const calibrationHasRunRef = useRef(false)
-  const isCalibratingRef = useRef(false)
   const fingerCurlStatesRef = useRef(new Map())
-  const lastCalibrationProgressRef = useRef(0)
   const showFingerDebugRef = useRef(false)
+  const performanceMetricsRef = useRef({ frameIntervals: [], lastFrameAt: 0, lastPublishedAt: 0 })
   const [cameraState, setCameraState] = useState('idle')
   const [errorMessage, setErrorMessage] = useState('')
   const [trackingError, setTrackingError] = useState('')
@@ -84,15 +81,44 @@ function PerformanceView() {
   const [isSustainActive, setIsSustainActive] = useState(false)
   const [handOctaveIndicators, setHandOctaveIndicators] = useState([])
   const [thereminPitch, setThereminPitch] = useState(null)
-  const [isCalibrating, setIsCalibrating] = useState(false)
-  const [calibrationProgress, setCalibrationProgress] = useState(0)
   const [instrumentVisualEvents, setInstrumentVisualEvents] = useState([])
   const [thereminVisual, setThereminVisual] = useState(null)
   const [fingerCurlDebugData, setFingerCurlDebugData] = useState([])
   const [showFingerDebug, setShowFingerDebug] = useState(false)
+  const [performanceMetrics, setPerformanceMetrics] = useState({ activeParticles: 0, canvasMs: 0, detectionMs: 0, fps: 0, gestureMs: 0, inputResolution: '—', particleMs: 0, skeletonMs: 0 })
 
   const handleTrackingError = useCallback((message) => {
     setTrackingError(message)
+  }, [])
+
+  const reportPerformanceMetrics = useCallback((nextMetrics) => {
+    const metrics = performanceMetricsRef.current
+    const now = performance.now()
+    Object.assign(metrics, nextMetrics)
+
+    if (nextMetrics.frameAt) {
+      if (metrics.lastFrameAt) {
+        metrics.frameIntervals = [...metrics.frameIntervals, nextMetrics.frameAt - metrics.lastFrameAt].slice(-24)
+        const averageFrameMs = metrics.frameIntervals.reduce((sum, value) => sum + value, 0) / metrics.frameIntervals.length
+        metrics.fps = averageFrameMs ? 1000 / averageFrameMs : 0
+      }
+      metrics.lastFrameAt = nextMetrics.frameAt
+    }
+
+    metrics.canvasMs = (metrics.skeletonMs ?? 0) + (metrics.particleMs ?? 0)
+    if (now - metrics.lastPublishedAt < 180) return
+
+    metrics.lastPublishedAt = now
+    setPerformanceMetrics({
+      activeParticles: metrics.activeParticles ?? 0,
+      canvasMs: metrics.canvasMs,
+      detectionMs: metrics.detectionMs ?? 0,
+      fps: metrics.fps ?? 0,
+      gestureMs: metrics.gestureMs ?? 0,
+      inputResolution: metrics.inputResolution ?? '—',
+      particleMs: metrics.particleMs ?? 0,
+      skeletonMs: metrics.skeletonMs ?? 0,
+    })
   }, [])
 
   const registerNoteOnset = useCallback(() => {
@@ -117,6 +143,7 @@ function PerformanceView() {
 
   const handleHandResults = useCallback(({ landmarks, handedness }) => {
     const handRoles = getHandRoles(landmarks, handedness)
+    ensureFingerTapBaselines(landmarks, handRoles, calibrationBaselinesRef.current)
     const handOctaveShifts = updateHandOctaves(landmarks, handRoles, handOctaveShiftsRef)
     const nextOctaveIndicators = handRoles.map((handRole, handIndex) => ({
       color: handRole.color,
@@ -129,11 +156,6 @@ function PerformanceView() {
         ? currentIndicators
         : nextOctaveIndicators
     ))
-
-    if (isCalibratingRef.current) {
-      collectCalibrationSamples(landmarks, handRoles, calibrationBaselinesRef, calibrationSamplesRef, calibrationStartedAtRef, calibrationHasRunRef, isCalibratingRef, lastCalibrationProgressRef, setCalibrationProgress, setIsCalibrating)
-      return
-    }
 
     if (areBothHandsClosedFists(landmarks)) {
       if (!fistStartedAtRef.current) fistStartedAtRef.current = performance.now()
@@ -242,14 +264,14 @@ function PerformanceView() {
       return
     }
 
-    const stableFingersByHand = getStableCurledFingersByHand(
+    const stableFingersByHand = getStableTappedFingersByHand(
       landmarks,
       handRoles,
       calibrationBaselinesRef.current,
       fingerCurlStatesRef.current,
     )
     if (IS_FINGER_DEBUG_ENABLED && showFingerDebugRef.current) {
-      setFingerCurlDebugData(getFingerCurlDebugData(
+      setFingerCurlDebugData(getFingerTapDebugData(
         landmarks,
         handRoles,
         calibrationBaselinesRef.current,
@@ -322,7 +344,6 @@ function PerformanceView() {
     if (cameraState === 'active') {
       const hasCompletedOnboarding = sessionStorage.getItem('aeria-onboarding-complete') === 'true'
       setShowOnboarding(!hasCompletedOnboarding)
-      if (hasCompletedOnboarding) beginCalibration()
     }
   }, [cameraState])
 
@@ -384,19 +405,7 @@ function PerformanceView() {
   function startPerformance() {
     sessionStorage.setItem('aeria-onboarding-complete', 'true')
     setShowOnboarding(false)
-    beginCalibration()
-  }
-
-  function beginCalibration() {
-    if (calibrationHasRunRef.current) return
-
-    calibrationHasRunRef.current = true
-    isCalibratingRef.current = true
-    calibrationSamplesRef.current = new Map()
-    calibrationStartedAtRef.current = null
     fingerCurlStatesRef.current = new Map()
-    setCalibrationProgress(0)
-    setIsCalibrating(true)
   }
 
   function retryHandTracking() {
@@ -545,10 +554,15 @@ function PerformanceView() {
               ref={handTrackerRef}
               videoRef={videoRef}
               onError={handleTrackingError}
+              onMetrics={IS_PERFORMANCE_DEBUG_ENABLED ? reportPerformanceMetrics : undefined}
               onResults={handleHandResults}
               reloadKey={trackingRetryKey}
             />
-            <ParticleCanvas ref={particleCanvasRef} videoRef={videoRef} />
+            <ParticleCanvas
+              ref={particleCanvasRef}
+              onMetrics={IS_PERFORMANCE_DEBUG_ENABLED ? reportPerformanceMetrics : undefined}
+              videoRef={videoRef}
+            />
             <InstrumentVisuals
               activeInstrument={activeInstrument}
               activeNotes={activeNotes}
@@ -632,7 +646,6 @@ function PerformanceView() {
           </div>
         )}
         {cameraState === 'active' && showOnboarding && <OnboardingOverlay onStart={startPerformance} />}
-        {cameraState === 'active' && !showOnboarding && isCalibrating && <CalibrationOverlay progress={calibrationProgress} />}
       </section>
 
       <section className="ae-console" aria-label="Performance controls">
@@ -700,7 +713,7 @@ function PerformanceView() {
               {controlMode === 'piano'
                 ? playMode === 'chords'
                   ? 'Chord shapes: thumb + middle + pinky for C major; index + ring for A minor.'
-                  : 'Curl a finger toward your palm to play; use both hands for chords.'
+                  : 'Tap a fingertip downward like a piano key; use both hands for chords.'
                 : controlMode === 'theremin'
                   ? 'Theremin+: right hand controls pitch, pan, tone, and vibrato; left hand controls volume.'
                   : 'Move your right hand up or down to choose a C-major scale note, then pinch to play it.'}
@@ -712,10 +725,13 @@ function PerformanceView() {
       {IS_FINGER_DEBUG_ENABLED && cameraState === 'active' && !showOnboarding && (
         <>
           <button className="ae-debug-toggle" type="button" onClick={toggleFingerDebug} aria-pressed={showFingerDebug}>
-            {showFingerDebug ? 'Hide curl debug' : 'Show curl debug'}
+            {showFingerDebug ? 'Hide tap debug' : 'Show tap debug'}
           </button>
           {showFingerDebug && <FingerCurlDebugPanel hands={fingerCurlDebugData} />}
         </>
+      )}
+      {IS_PERFORMANCE_DEBUG_ENABLED && cameraState === 'active' && !showOnboarding && (
+        <PerformanceDebugOverlay metrics={performanceMetrics} />
       )}
     </main>
   )
@@ -765,54 +781,6 @@ function processHeldGesture(gestures, startedAtRef, triggeredRef, holdDuration, 
       triggeredRef.current.delete(id)
     }
   })
-}
-
-function collectCalibrationSamples(landmarks, handRoles, baselinesRef, samplesRef, startedAtRef, hasRunRef, isCalibratingRef, lastProgressRef, setProgress, setIsCalibrating) {
-  if (!landmarks.length) return
-
-  const now = performance.now()
-  const hasBothHands = ['left', 'right'].every((handId) => handRoles.some((handRole) => handRole.id === handId))
-  if (!hasBothHands) {
-    startedAtRef.current = null
-    samplesRef.current = new Map()
-    if (lastProgressRef.current !== 0) {
-      lastProgressRef.current = 0
-      setProgress(0)
-    }
-    return
-  }
-
-  if (startedAtRef.current === null) startedAtRef.current = now
-
-  landmarks.forEach((handLandmarks, handIndex) => {
-    const handId = handRoles[handIndex]?.id ?? `hand-${handIndex}`
-    const sample = samplesRef.current.get(handId) ?? { count: 0, distances: {} }
-    const distances = collectOpenHandFingerDistances(handLandmarks)
-    Object.entries(distances).forEach(([fingerName, distance]) => {
-      sample.distances[fingerName] = (sample.distances[fingerName] ?? 0) + distance
-    })
-    sample.count += 1
-    samplesRef.current.set(handId, sample)
-  })
-
-  const progress = Math.min((now - startedAtRef.current) / 2000, 1)
-  if (now - lastProgressRef.current > 100 || progress === 1) {
-    lastProgressRef.current = now
-    setProgress(progress)
-  }
-
-  if (progress < 1) return
-
-  const baselines = new Map()
-  samplesRef.current.forEach((sample, handId) => {
-    baselines.set(handId, Object.fromEntries(
-      Object.entries(sample.distances).map(([fingerName, total]) => [fingerName, total / sample.count]),
-    ))
-  })
-  baselinesRef.current = baselines
-  hasRunRef.current = true
-  isCalibratingRef.current = false
-  setIsCalibrating(false)
 }
 
 function updateHandOctaves(landmarks, handRoles, handOctaveShiftsRef) {
